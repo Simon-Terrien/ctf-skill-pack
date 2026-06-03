@@ -1,0 +1,5 @@
+aiokafka>=0.11
+redis>=5.0
+pydantic>=2.6
+openai>=1.30
+pyyaml>=6.0

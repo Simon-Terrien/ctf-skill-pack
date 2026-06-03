@@ -1,0 +1,33 @@
+# Git metadata and local tooling state
+.git/
+.agents/
+.codex/
+.pytest_cache/
+
+# Python caches and virtualenvs
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Test and coverage output
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Editor and OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Temporary and local-only artifacts
+tmp/
+/tmp/
+runtime/*.log
+runtime/*.tmp
+runtime/*.sqlite3
+runtime/*.db
