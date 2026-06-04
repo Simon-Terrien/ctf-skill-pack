@@ -7,6 +7,8 @@ behind the `search` callables — point them at your stack.
 """
 from __future__ import annotations
 
+import os
+from pathlib import Path
 import time
 from typing import Awaitable, Callable, Optional
 
@@ -19,6 +21,53 @@ TraceFn = Callable[[str, dict], Awaitable[None]]
 
 async def _null_search(query: str) -> list[tuple[str, str, str, str]]:
     return []
+
+
+def _tokenize_query(query: str) -> list[str]:
+    return [token.lower() for token in query.split() if token.strip()]
+
+
+async def _search_directory(query: str, root: str | None, source_type: str) -> list[tuple[str, str, str, str]]:
+    if not root:
+        return []
+    base = Path(root)
+    if not base.exists():
+        return []
+    tokens = _tokenize_query(query)
+    hits: list[tuple[str, str, str, str]] = []
+    for path in sorted(base.rglob("*")):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        low = text.lower()
+        if tokens and not all(token in low for token in tokens):
+            continue
+        snippet = text.strip().replace("\n", " ")[:280]
+        reliability = "medium" if source_type == "local_notes" else "low"
+        hits.append((str(path), source_type, snippet, reliability))
+    return hits
+
+
+async def local_notes_search(query: str) -> list[tuple[str, str, str, str]]:
+    return await _search_directory(query, os.getenv("CTF_NOTES_DIR"), "local_notes")
+
+
+async def writeup_search(query: str) -> list[tuple[str, str, str, str]]:
+    return await _search_directory(query, os.getenv("CTF_WRITEUPS_DIR"), "writeup")
+
+
+async def composed_local_search(query: str) -> list[tuple[str, str, str, str]]:
+    hits = await local_notes_search(query)
+    if hits:
+        return hits
+    return await writeup_search(query)
+
+
+def make_researcher(trace: TraceFn | None = None) -> "Researcher":
+    return Researcher(local_search=composed_local_search, trace=trace)
 
 
 class Researcher:
@@ -144,6 +193,11 @@ class DeepSearcher:
             "synthesis": {
                 "answer_or_plan": ledger[0]["claim"] if ledger else "",
                 "confidence": "medium" if ledger else "low",
+                "unresolved_gaps": gaps,
+            },
+            "escalation_brief": {
+                "goal": goal,
+                "queries_attempted": list(seen),
                 "unresolved_gaps": gaps,
             },
         }

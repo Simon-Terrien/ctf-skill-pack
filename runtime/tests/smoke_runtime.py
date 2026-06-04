@@ -4,8 +4,10 @@ import asyncio
 import contextlib
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from ctfrt.agent import SpecialistAgent
@@ -16,7 +18,7 @@ from ctfrt.memory import InMemoryWorkingMemory
 from ctfrt.orchestrator import Orchestrator
 from ctfrt.sandbox import run_sandboxed
 from ctfrt.trace_recorder import iter_trace_events
-from ctfrt.tools import Researcher
+from ctfrt.tools import DeepSearcher, Researcher, local_notes_search, make_researcher, writeup_search
 from ctfrt.workspace import register_artifacts
 
 
@@ -231,6 +233,64 @@ async def test_researcher_tool_call_failed_trace():
     assert "tool_call_failed" in kinds
 
 
+async def test_researcher_local_notes_backend(tmp_path: Path):
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "xor.md").write_text("single-byte xor inversion recovered the flag", encoding="utf-8")
+    old = os.environ.get("CTF_NOTES_DIR")
+    try:
+        os.environ["CTF_NOTES_DIR"] = str(notes)
+        hits = await local_notes_search("xor inversion")
+        assert hits
+        assert hits[0][1] == "local_notes"
+    finally:
+        if old is None:
+            os.environ.pop("CTF_NOTES_DIR", None)
+        else:
+            os.environ["CTF_NOTES_DIR"] = old
+
+
+async def test_researcher_writeup_backend(tmp_path: Path):
+    writeups = tmp_path / "writeups"
+    writeups.mkdir()
+    (writeups / "ssti.txt").write_text("jinja2 ssti chain led to rce", encoding="utf-8")
+    old = os.environ.get("CTF_WRITEUPS_DIR")
+    try:
+        os.environ["CTF_WRITEUPS_DIR"] = str(writeups)
+        hits = await writeup_search("jinja2 ssti")
+        assert hits
+        assert hits[0][1] == "writeup"
+    finally:
+        if old is None:
+            os.environ.pop("CTF_WRITEUPS_DIR", None)
+        else:
+            os.environ["CTF_WRITEUPS_DIR"] = old
+
+
+async def test_make_researcher_prefers_local_notes(tmp_path: Path):
+    notes = tmp_path / "notes"
+    notes.mkdir()
+    (notes / "memcmp.md").write_text("memcmp tracing worked", encoding="utf-8")
+    old = os.environ.get("CTF_NOTES_DIR")
+    try:
+        os.environ["CTF_NOTES_DIR"] = str(notes)
+        result = await make_researcher().lookup("memcmp tracing", tokens=["memcmp tracing"])
+        assert result.evidence
+        assert result.evidence[0].type == "local_notes"
+    finally:
+        if old is None:
+            os.environ.pop("CTF_NOTES_DIR", None)
+        else:
+            os.environ["CTF_NOTES_DIR"] = old
+
+
+async def test_deepsearcher_returns_escalation_brief():
+    ds = DeepSearcher()
+    result = await ds.investigate("xor oracle")
+    assert "escalation_brief" in result
+    assert result["escalation_brief"]["goal"] == "xor oracle"
+
+
 async def test_gate_emits_acceptance_trace():
     from ctfrt.contracts import TraceEvent
 
@@ -420,6 +480,80 @@ def test_trace_cli_show_and_export(tmp_path: Path):
     assert exported_rows[0]["kind"] == "solved"
     assert exported_rows[0]["payload"] == {"technique": ["xor"], "source": "reverse:Stub"}
     assert result == str(exported)
+
+
+def test_cli_init_workdir_json(tmp_path: Path):
+    artifact = tmp_path / "note.txt"
+    artifact.write_text("hello", encoding="utf-8")
+    challenge_root = tmp_path / "challenge-root"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "runtime"
+    env["CTF_CHALLENGE_ROOT"] = str(challenge_root)
+    result = subprocess.run([
+        sys.executable, "-m", "ctfrt.cli", "init-workdir",
+        "--name", "seed-workdir",
+        "--artifact", str(artifact),
+        "--json",
+    ], text=True, capture_output=True, env=env)
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["workdir"] == "seed-workdir"
+    assert payload["artifacts"] == ["note.txt"]
+    assert (challenge_root / "seed-workdir" / "note.txt").exists()
+
+
+def test_cli_inspect_json(tmp_path: Path):
+    artifact = tmp_path / "a.bin"
+    artifact.write_bytes(b"\x7fELF" + b"x" * 20)
+    challenge_root = tmp_path / "challenge-root"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "runtime"
+    env["CTF_CHALLENGE_ROOT"] = str(challenge_root)
+    result = subprocess.run([
+        sys.executable, "-m", "ctfrt.cli", "inspect",
+        "--name", "inspect-elf",
+        "--artifact", str(artifact),
+        "--json",
+    ], text=True, capture_output=True, env=env)
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["category"] == "reverse"
+    assert payload["triage"]["type"] == "elf"
+
+
+def test_cli_validate_candidate_json_solved():
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "runtime"
+    result = subprocess.run([
+        sys.executable, "-m", "ctfrt.cli", "validate-candidate",
+        "--challenge-id", "cand-1",
+        "--candidate", "CTF{ok}",
+        "--flag-format", r"CTF\{[^}]+\}",
+        "--validation-level", "reproduced",
+        "--local-validation", "passed",
+        "--oracle-validation", "not_available",
+        "--evidence", "unit reproduction",
+        "--json",
+    ], text=True, capture_output=True, env=env)
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "solved"
+
+
+def test_cli_solve_local_json_output(tmp_path: Path):
+    artifact = tmp_path / "note.txt"
+    artifact.write_text("noise CTF{cli_static_win} end")
+    result = _run_solve_local_subprocess(
+        name="cli-json",
+        artifact=artifact,
+        flag_format=r"CTF\{[^}]+\}",
+        timeout=5,
+        json_output=True,
+    )
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "solved"
+    assert payload["candidate"] == "CTF{cli_static_win}"
 
 
 def test_trace_cli_show_and_export_support_run_filters(tmp_path: Path):
@@ -847,7 +981,8 @@ def _run_solve_local_subprocess(*, name: str, artifact: Path, flag_format: str,
                                 engine: str | None = None,
                                 challenge_root: Path | None = None,
                                 log_level: str | None = None,
-                                debug_flags: str | None = None):
+                                debug_flags: str | None = None,
+                                json_output: bool = False):
     env = os.environ.copy()
     env["PYTHONPATH"] = "runtime"
     if engine is None:
@@ -870,14 +1005,17 @@ def _run_solve_local_subprocess(*, name: str, artifact: Path, flag_format: str,
         env["CTF_DEBUG_FLAGS"] = debug_flags
     else:
         env.pop("CTF_DEBUG_FLAGS", None)
-    return subprocess.run([
+    cmd = [
         sys.executable, "-m", "ctfrt.cli", "solve-local",
         "--name", name,
         "--category", "misc",
         "--artifact", str(artifact),
         "--flag-format", flag_format,
         "--timeout", str(timeout),
-    ], text=True, capture_output=True, timeout=10, env=env)
+    ]
+    if json_output:
+        cmd.append("--json")
+    return subprocess.run(cmd, text=True, capture_output=True, timeout=10, env=env)
 
 
 def test_cli_solve_local_subprocess_exits_cleanly(tmp_path: Path):
@@ -948,6 +1086,28 @@ def test_cli_solve_local_logs_event_trail_and_redacts_flag(tmp_path: Path):
     assert "CTF{cli_static_win}" not in result.stderr
 
 
+def test_runtime_run_ctrl_c_exits_cleanly():
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "runtime"
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "ctfrt.run", "--component", "trace-recorder"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    try:
+        time.sleep(0.5)
+        proc.send_signal(signal.SIGINT)
+        stdout, stderr = proc.communicate(timeout=5)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert proc.returncode in (0, 130, -signal.SIGINT)
+    combined = f"{stdout}\n{stderr}"
+    assert "Traceback" not in combined
+
+
 def test_cli_solve_local_unsolved_exits_without_hanging(tmp_path: Path):
     artifact = tmp_path / "no_flag.txt"
     artifact.write_text("noise only")
@@ -1003,11 +1163,18 @@ TESTS = [
     test_specialist_static_flag_scan_emits_candidate,
     test_specialist_tool_call_traces_emit_on_engine_path,
     test_researcher_tool_call_failed_trace,
+    test_researcher_local_notes_backend,
+    test_researcher_writeup_backend,
+    test_make_researcher_prefers_local_notes,
+    test_deepsearcher_returns_escalation_brief,
     test_gate_emits_acceptance_trace,
     test_sandbox_worker_traces_request_and_result,
     test_trace_recorder_persists_solved_trace,
     test_trace_recorder_redacts_flag_payload_by_default,
     test_trace_cli_show_and_export,
+    test_cli_init_workdir_json,
+    test_cli_inspect_json,
+    test_cli_validate_candidate_json_solved,
     test_trace_cli_show_and_export_support_run_filters,
     test_trace_cli_validate_trace_valid_solved_returns_0,
     test_trace_cli_validate_trace_needs_engine_only_returns_1,
@@ -1020,6 +1187,8 @@ TESTS = [
     test_cli_solve_local_persists_trace,
     test_cli_solve_local_registers_artifact_under_workspace,
     test_cli_solve_local_logs_event_trail_and_redacts_flag,
+    test_cli_solve_local_json_output,
+    test_runtime_run_ctrl_c_exits_cleanly,
     test_cli_solve_local_unsolved_exits_without_hanging,
     test_cli_solve_local_biobrain_solves_xor_artifact_first,
 ]

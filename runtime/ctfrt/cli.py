@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import inspect
+import json
 import os
 import uuid
 from pathlib import Path
@@ -16,7 +17,7 @@ from .gate import Gate
 from .engines import engine_for_category
 from .log import get_logger, kv, sanitize
 from .memory import InMemoryWorkingMemory, make_working_memory
-from .orchestrator import Orchestrator
+from .orchestrator import Orchestrator, route
 from .trace_recorder import (
     filter_trace_events,
     iter_trace_events,
@@ -26,10 +27,29 @@ from .trace_recorder import (
     trace_path_for,
     validate_trace_events,
 )
-from .tools import Researcher
-from .workspace import register_artifacts
+from .tools import make_researcher
+from .workspace import register_artifacts, workspace_root
 
 log = get_logger(__name__)
+EXIT_SOLVED = 0
+EXIT_NOT_SOLVED = 1
+EXIT_RUNTIME_ERROR = 2
+EXIT_UNSAFE_INPUT = 3
+
+
+def _json_dump(value: object) -> str:
+    return json.dumps(value, default=str)
+
+
+def _emit(args, plain: str | None = None, payload: dict | list | None = None) -> None:
+    if getattr(args, "json", False):
+        print(_json_dump(payload if payload is not None else {"message": plain or ""}))
+    elif plain is not None:
+        print(plain)
+
+
+def _unsafe_exit(exc: ValueError) -> SystemExit:
+    return SystemExit(EXIT_UNSAFE_INPUT)
 
 
 def _category(value: str | None) -> Category | None:
@@ -38,17 +58,127 @@ def _category(value: str | None) -> Category | None:
     return Category(value)
 
 
+async def init_workdir(args) -> None:
+    challenge_id = args.name or uuid.uuid4().hex[:12]
+    try:
+        workdir, artifacts = register_artifacts(challenge_id, args.artifact or [])
+    except ValueError as exc:
+        if getattr(args, "json", False):
+            print(_json_dump({"error": str(exc), "exit_code": EXIT_UNSAFE_INPUT}))
+        raise _unsafe_exit(exc) from exc
+    root = workspace_root(challenge_id, workdir)
+    payload = {
+        "challenge_id": challenge_id,
+        "workdir": workdir,
+        "workspace_path": str(root),
+        "artifacts": artifacts,
+    }
+    _emit(args, plain=str(root), payload=payload)
+
+
+async def inspect_cmd(args) -> None:
+    challenge_id = args.name or uuid.uuid4().hex[:12]
+    try:
+        workdir, artifacts = register_artifacts(challenge_id, args.artifact or [])
+    except ValueError as exc:
+        if getattr(args, "json", False):
+            print(_json_dump({"error": str(exc), "exit_code": EXIT_UNSAFE_INPUT}))
+        raise _unsafe_exit(exc) from exc
+    ch = Challenge(
+        id=challenge_id,
+        name=args.name or challenge_id,
+        workdir=workdir,
+        category_hint=_category(args.category),
+        artifacts=artifacts,
+        flag_format=args.flag_format,
+        remote=args.remote,
+        description=args.description or "",
+    )
+    orch = Orchestrator(InMemoryBus(), InMemoryWorkingMemory())
+    triage = await orch.triage(ch)
+    routed = route(triage, ch.category_hint)
+    payload = {
+        "challenge_id": ch.id,
+        "workdir": workdir,
+        "artifacts": artifacts,
+        "triage": triage,
+        "category": routed.value,
+    }
+    if args.json:
+        print(_json_dump(payload))
+        return
+    print(f"Challenge: {ch.id}")
+    print(f"Category: {routed.value}")
+    print(f"Artifacts: {','.join(artifacts) if artifacts else '-'}")
+    print(f"Triage type: {triage.get('type', '?')}")
+    print(f"Artifact types: {','.join(triage.get('artifact_types', [])) or '-'}")
+
+
+async def validate_candidate(args) -> None:
+    candidate = Candidate(
+        challenge_id=args.challenge_id,
+        workdir=args.workdir or "",
+        candidate=args.candidate,
+        source=args.source,
+        flag_format=args.flag_format,
+        validation_level=args.validation_level,
+        local_validation=args.local_validation,
+        oracle_validation=args.oracle_validation,
+        evidence=args.evidence or [],
+        technique=args.technique or [],
+        reproduction=_candidate_reproduction(args),
+    )
+    gate = Gate(InMemoryBus(), InMemoryWorkingMemory())
+    verdict = await gate.evaluate(candidate)
+    payload = {
+        "challenge_id": verdict.challenge_id,
+        "candidate_id": verdict.id,
+        "status": verdict.status,
+        "validation_level": verdict.validation_level,
+        "local_validation": verdict.local_validation,
+        "oracle_validation": verdict.oracle_validation,
+        "confidence": verdict.confidence.value,
+    }
+    if args.json:
+        print(_json_dump(payload))
+    else:
+        print(f"{verdict.status} {verdict.validation_level}")
+    raise SystemExit(EXIT_SOLVED if verdict.status in {"solved", "locally_verified"} else EXIT_NOT_SOLVED)
+
+
+def _candidate_reproduction(args) -> dict | None:
+    if not args.reproduction_method:
+        return None
+    recipe: dict[str, object] = {"method": args.reproduction_method}
+    if args.reproduction_artifact:
+        recipe["artifact"] = args.reproduction_artifact
+    if args.reproduction_argv:
+        recipe["argv"] = args.reproduction_argv
+    if args.expect_exit is not None:
+        recipe["expect_exit"] = args.expect_exit
+    return recipe
+
+
 async def submit(args) -> None:
     if not os.getenv("CTF_KAFKA") and not args.force_inmemory:
-        raise SystemExit(
+        message = (
             "Refusing to submit to the default in-memory bus from a separate process. "
             "Set CTF_KAFKA for distributed runtime, or use solve-local."
         )
+        if args.json:
+            print(_json_dump({"error": message, "exit_code": EXIT_RUNTIME_ERROR}))
+        raise SystemExit(EXIT_RUNTIME_ERROR)
+    await _submit_impl(args)
+
+
+async def _submit_impl(args) -> None:
     challenge_id = uuid.uuid4().hex[:12]
     try:
         workdir, artifacts = register_artifacts(challenge_id, args.artifact or [])
     except ValueError as exc:
-        raise SystemExit(str(exc)) from exc
+        if getattr(args, "json", False):
+            print(_json_dump({"error": str(exc), "exit_code": EXIT_UNSAFE_INPUT}))
+        raise _unsafe_exit(exc) from exc
     log.info("submit challenge prepared", extra=kv(
         challenge_id=challenge_id, workdir=workdir, artifact_count=len(artifacts)))
     bus = make_bus()
@@ -66,7 +196,7 @@ async def submit(args) -> None:
         )
         log.debug("publish topic", extra=kv(topic=Topics.CHALLENGES, challenge_id=ch.id))
         await bus.publish(Topics.CHALLENGES, ch, key=ch.id)
-        print(ch.id)
+        _emit(args, plain=ch.id, payload={"challenge_id": ch.id, "workdir": workdir, "artifacts": artifacts})
     finally:
         log.info("submit challenge finished", extra=kv(challenge_id=challenge_id))
         await bus.stop()
@@ -75,12 +205,14 @@ async def submit(args) -> None:
 async def solve_local(args) -> None:
     bus = InMemoryBus()
     mem = InMemoryWorkingMemory()
-    researcher = Researcher()
+    researcher = make_researcher()
     run_id = uuid.uuid4().hex[:12]
     try:
         workdir, artifacts = register_artifacts(args.name, args.artifact or [])
     except ValueError as exc:
-        raise SystemExit(str(exc)) from exc
+        if getattr(args, "json", False):
+            print(_json_dump({"error": str(exc), "exit_code": EXIT_UNSAFE_INPUT}))
+        raise _unsafe_exit(exc) from exc
     log.info("solve-local prepared", extra=kv(
         challenge_id=args.name, workdir=workdir, artifact_count=len(artifacts), timeout=args.timeout))
     trace_dir = Path(os.getenv("CTF_TRACE_DIR", ".ctfrt/traces"))
@@ -154,12 +286,20 @@ async def solve_local(args) -> None:
                                 await asyncio.sleep(0.02)
                             log.info("solve-local solved", extra=kv(
                                 challenge_id=ch.id, status=c.status, candidate=c.candidate))
-                            print(c.candidate)
+                            _emit(args, plain=c.candidate, payload={
+                                "challenge_id": ch.id,
+                                "status": c.status,
+                                "candidate": c.candidate,
+                            })
                         else:
                             log.info("solve-local finished without solved verdict", extra=kv(
                                 challenge_id=ch.id, status=c.status, candidate=c.candidate))
-                            print(f"not solved: {c.status} {c.candidate}")
-                        return
+                            _emit(args, plain=f"not solved: {c.status} {c.candidate}", payload={
+                                "challenge_id": ch.id,
+                                "status": c.status,
+                                "candidate": c.candidate,
+                            })
+                        raise SystemExit(EXIT_SOLVED if c.status == "solved" else EXIT_NOT_SOLVED)
                     flag_task = asyncio.create_task(flag_sub.__anext__())
 
                 if trace_task in done:
@@ -168,13 +308,21 @@ async def solve_local(args) -> None:
                         detail = ev.payload.get("error") or ev.payload.get("reasoning") or ev.payload.get("reason", "")
                         log.info("solve-local terminal trace", extra=kv(
                             challenge_id=ch.id, kind=ev.kind, detail=str(detail)))
-                        print(f"not solved: {ev.kind} {detail}".rstrip())
-                        return
+                        _emit(args, plain=f"not solved: {ev.kind} {detail}".rstrip(), payload={
+                            "challenge_id": ch.id,
+                            "status": ev.kind,
+                            "detail": detail,
+                        })
+                        raise SystemExit(EXIT_NOT_SOLVED)
                     trace_task = asyncio.create_task(trace_sub.__anext__())
     except TimeoutError:
         log.info("solve-local timeout", extra=kv(challenge_id=ch.id, timeout=args.timeout))
-        print(f"not solved: timeout after {args.timeout:g}s")
-        raise SystemExit(1)
+        _emit(args, plain=f"not solved: timeout after {args.timeout:g}s", payload={
+            "challenge_id": ch.id,
+            "status": "timeout",
+            "timeout": args.timeout,
+        })
+        raise SystemExit(EXIT_NOT_SOLVED)
     finally:
         flag_task.cancel()
         trace_task.cancel()
@@ -207,6 +355,9 @@ def show_trace(args) -> None:
     trace_dir = _trace_dir(args)
     events = iter_trace_events(trace_dir, args.challenge_id)
     events = filter_trace_events(events, run_id=_selected_trace_run_id(args, trace_dir))
+    if args.json:
+        print(_json_dump([ev.model_dump() for ev in events]))
+        return
     for ev in events:
         print(summarize_trace_event(ev))
 
@@ -219,6 +370,9 @@ def summarize_trace(args) -> None:
         raise SystemExit(f"no trace events found for {args.challenge_id}")
     summary = mission_trace_summary(events)
     technique = summary["technique"]
+    if args.json:
+        print(_json_dump(summary))
+        return
     print(f"Challenge: {summary['challenge_id']}")
     print(f"Status: {summary['status']}")
     print(f"Category: {summary['category']}")
@@ -251,18 +405,28 @@ def validate_trace(args) -> None:
     trace_dir = _trace_dir(args)
     src = trace_path_for(trace_dir, args.challenge_id)
     if not src.exists():
-        raise SystemExit(2)
+        if args.json:
+            print(_json_dump({"challenge_id": args.challenge_id, "valid": False, "errors": ["trace not found"], "exit_code": EXIT_RUNTIME_ERROR}))
+        raise SystemExit(EXIT_RUNTIME_ERROR)
     events = iter_trace_events(trace_dir, args.challenge_id)
     events = filter_trace_events(events, run_id=_selected_trace_run_id(args, trace_dir))
     if not events:
-        raise SystemExit(2)
+        if args.json:
+            print(_json_dump({"challenge_id": args.challenge_id, "valid": False, "errors": ["trace not found"], "exit_code": EXIT_RUNTIME_ERROR}))
+        raise SystemExit(EXIT_RUNTIME_ERROR)
     errors = validate_trace_events(events)
     if errors:
-        print(f"TRACE INVALID: {args.challenge_id}")
-        for error in errors:
-            print(f"- {error}")
-        raise SystemExit(1)
-    print(f"TRACE VALID: {args.challenge_id}")
+        if args.json:
+            print(_json_dump({"challenge_id": args.challenge_id, "valid": False, "errors": errors, "exit_code": EXIT_NOT_SOLVED}))
+        else:
+            print(f"TRACE INVALID: {args.challenge_id}")
+            for error in errors:
+                print(f"- {error}")
+        raise SystemExit(EXIT_NOT_SOLVED)
+    _emit(args, plain=f"TRACE VALID: {args.challenge_id}", payload={
+        "challenge_id": args.challenge_id,
+        "valid": True,
+    })
 
 
 def main() -> None:
@@ -277,7 +441,42 @@ def main() -> None:
     p.add_argument("--remote")
     p.add_argument("--description")
     p.add_argument("--force-inmemory", action="store_true")
+    p.add_argument("--json", action="store_true")
     p.set_defaults(func=submit)
+
+    p = sub.add_parser("init-workdir")
+    p.add_argument("--name")
+    p.add_argument("--artifact", action="append")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=init_workdir)
+
+    p = sub.add_parser("inspect")
+    p.add_argument("--name")
+    p.add_argument("--category", choices=[c.value for c in Category])
+    p.add_argument("--artifact", action="append")
+    p.add_argument("--flag-format")
+    p.add_argument("--remote")
+    p.add_argument("--description")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=inspect_cmd)
+
+    p = sub.add_parser("validate-candidate")
+    p.add_argument("--challenge-id", required=True)
+    p.add_argument("--workdir")
+    p.add_argument("--candidate", required=True)
+    p.add_argument("--source", default="cli")
+    p.add_argument("--flag-format")
+    p.add_argument("--validation-level", choices=["observed", "format_ok", "reproduced", "oracle_accepted"], default="observed")
+    p.add_argument("--local-validation", choices=["passed", "failed", "not_attempted"], default="not_attempted")
+    p.add_argument("--oracle-validation", choices=["passed", "failed", "not_available"], default="not_available")
+    p.add_argument("--evidence", action="append")
+    p.add_argument("--technique", action="append")
+    p.add_argument("--reproduction-method", choices=["reencode_xor", "sandbox_exec"])
+    p.add_argument("--reproduction-artifact")
+    p.add_argument("--reproduction-argv", action="append")
+    p.add_argument("--expect-exit", type=int)
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=validate_candidate)
 
     p = sub.add_parser("solve-local")
     p.add_argument("--name", required=True)
@@ -287,6 +486,7 @@ def main() -> None:
     p.add_argument("--remote")
     p.add_argument("--description")
     p.add_argument("--timeout", type=float, default=5.0)
+    p.add_argument("--json", action="store_true")
     p.set_defaults(func=solve_local)
 
     p = sub.add_parser("show-trace")
@@ -295,6 +495,7 @@ def main() -> None:
     group = p.add_mutually_exclusive_group()
     group.add_argument("--latest", action="store_true")
     group.add_argument("--run-id")
+    p.add_argument("--json", action="store_true")
     p.set_defaults(func=show_trace)
 
     p = sub.add_parser("summarize-trace")
@@ -303,6 +504,7 @@ def main() -> None:
     group = p.add_mutually_exclusive_group()
     group.add_argument("--latest", action="store_true")
     group.add_argument("--run-id")
+    p.add_argument("--json", action="store_true")
     p.set_defaults(func=summarize_trace)
 
     p = sub.add_parser("export-trace")
@@ -320,13 +522,17 @@ def main() -> None:
     group = p.add_mutually_exclusive_group()
     group.add_argument("--latest", action="store_true")
     group.add_argument("--run-id")
+    p.add_argument("--json", action="store_true")
     p.set_defaults(func=validate_trace)
 
     args = parser.parse_args()
-    if inspect.iscoroutinefunction(args.func):
-        asyncio.run(args.func(args))
-    else:
-        args.func(args)
+    try:
+        if inspect.iscoroutinefunction(args.func):
+            asyncio.run(args.func(args))
+        else:
+            args.func(args)
+    except KeyboardInterrupt:
+        raise SystemExit(130)
 
 
 if __name__ == "__main__":

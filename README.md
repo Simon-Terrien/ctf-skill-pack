@@ -19,28 +19,40 @@ ctf-skill-pack/
   ctf-orchestrator/          # routing, board state, dedup, master flag ledger
   researcher/                # fast single-pass lookup (shared service)
   deepsearcher/              # iterative multi-hop investigation (expensive tier)
-  reverse/                   # thin SOP over vendored ctf-reverse content
+  reverse/                   # local reverse doctrine: SKILL.md, references, YAML, later scripts
   flag-discipline/           # verification gate — no solve without it
   exploit-sandbox/           # isolation gate — no execution without it
 ```
 
-## Vendoring the corpus
+## Skill structure
 
-Local-first: clone, strip, harden — no live dependency.
+Each skill is a directory anchored by `SKILL.md` and may also contain:
 
-```bash
-git clone https://github.com/ljagiello/ctf-skills /tmp/ctf-skills
-# vendor only the category content you reference; keep their allowed-tools gates
-cp -r /tmp/ctf-skills/ctf-reverse ./ctf-reverse
-# reverse/SKILL.md references ./ctf-reverse/ for technique depth
+- `scripts/` for executable helpers
+- `references/` for detailed operator or domain material
+- `assets/` for templates or static resources
+- local YAML or similar support files for machine-readable doctrine
+
+Current reverse skill structure is trending toward:
+
+```text
+reverse/
+├── SKILL.md
+├── REFERENCE.md
+├── TECHNIQUES.yaml
+├── DECISION_TREE.yaml
+└── scripts/              # add executable helpers here later
 ```
+
+Do not forget `scripts/` when a skill grows beyond pure doctrine. Repetitive or
+machine-executable workflows belong there, not embedded inline in `SKILL.md`.
 
 ## Build order
 
 1. `shared/schemas.md` — done; everything depends on it.
 2. `researcher` — done; `reverse` and the orchestrator consume its schema.
 3. `deepsearcher` — done; researcher's escalation target.
-4. `reverse` — done; thin SOP, references vendored `ctf-reverse/`.
+4. `reverse` — done; local SOP plus reference material and machine-readable doctrine.
 5. `flag-discipline` + `exploit-sandbox` — done; the two gates.
 6. `ctf-orchestrator` — done; wires it together.
 

@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-This repository is a CTF skill pack with one canonical runtime implementation under `runtime/ctfrt/`. Shared contracts live in `shared/schemas.md` and should be updated there first. Each skill has its own `SKILL.md` in a top-level directory such as `reverse/`, `web-exploit/`, or `binary-pwn/`. Runtime tests live in `runtime/tests/`. Avoid adding or shipping duplicate top-level runtime files outside `runtime/ctfrt/`.
+This repository is a CTF skill pack with one canonical runtime implementation under `runtime/ctfrt/`. Shared contracts live in `shared/schemas.md` and should be updated there first. Each skill has its own top-level directory such as `reverse/`, `web-exploit/`, or `binary-pwn/`, anchored by `SKILL.md` and optionally extended with `scripts/`, `references/`, `assets/`, and machine-readable support files such as YAML doctrine. Runtime tests live in `runtime/tests/`. Avoid adding or shipping duplicate top-level runtime files outside `runtime/ctfrt/`.
 
 ## Build, Test, and Development Commands
 The runtime is Python-based and has no separate build step.

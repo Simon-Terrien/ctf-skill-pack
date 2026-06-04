@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import hashlib
 import os
+import signal
 
 from .bus import make_bus, Bus
 from .log import get_logger, setup_logging, kv
@@ -24,7 +25,7 @@ from .orchestrator import Orchestrator
 from .agent import SpecialistAgent
 from .sandbox import run_sandboxed
 from .contracts import SandboxRequest
-from .tools import Researcher, DeepSearcher
+from .tools import make_researcher
 from .trace_recorder import TraceRecorder
 
 log = get_logger(__name__)
@@ -109,26 +110,58 @@ async def main(component: str = "all") -> None:
     bus = make_bus()
     await bus.start()
     mem = make_working_memory()
-    researcher = Researcher()
+    researcher = make_researcher()
 
-    tasks: list = []
+    tasks: list[asyncio.Task] = []
     for _name, extra in _optional_components(component, bus):
-        tasks.append(extra.run())
+        tasks.append(asyncio.create_task(extra.run()))
     if component in ("all", "orchestrator"):
-        tasks.append(Orchestrator(bus, mem).run())
+        tasks.append(asyncio.create_task(Orchestrator(bus, mem).run()))
     if component in ("all", "gate"):
-        tasks.append(Gate(bus, mem).run())
+        tasks.append(asyncio.create_task(Gate(bus, mem).run()))
     if component in ("all", "sandbox"):
-        tasks.append(sandbox_worker(bus))
+        tasks.append(asyncio.create_task(sandbox_worker(bus)))
     if component in ("all", "specialists"):
         for cat in Category:
-            tasks.append(SpecialistAgent(cat, bus, mem, None, researcher,
-                                         engine=engine_for_category(cat)).run())
+            tasks.append(asyncio.create_task(SpecialistAgent(
+                cat, bus, mem, None, researcher,
+                engine=engine_for_category(cat)).run()))
 
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def _request_stop() -> None:
+        log.info("runtime stop requested", extra=kv(component=component))
+        stop.set()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _request_stop)
+        except NotImplementedError:
+            pass
+
+    stop_task = asyncio.create_task(stop.wait())
     try:
-        await asyncio.gather(*tasks)
+        done, pending = await asyncio.wait(
+            [*tasks, stop_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if stop.is_set():
+            for task in tasks:
+                task.cancel()
+        for task in done:
+            if task in tasks and not task.cancelled():
+                exc = task.exception()
+                if exc is not None:
+                    raise exc
+        await asyncio.gather(*tasks, return_exceptions=True)
     finally:
+        stop_task.cancel()
+        await asyncio.gather(stop_task, return_exceptions=True)
         log.info("runtime shutdown", extra=kv(component=component))
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         await bus.stop()
         await mem.close()
 
@@ -138,4 +171,7 @@ if __name__ == "__main__":
     ap.add_argument("--component", default="all",
                     choices=["all", "orchestrator", "gate", "sandbox", "specialists", "trace-recorder", "memory"])
     args = ap.parse_args()
-    asyncio.run(main(args.component))
+    try:
+        asyncio.run(main(args.component))
+    except KeyboardInterrupt:
+        raise SystemExit(130)

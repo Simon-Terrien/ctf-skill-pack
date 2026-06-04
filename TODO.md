@@ -168,64 +168,64 @@ These items improve developer experience, routing quality, and reproducibility.
 
 ### P1.1 — Runtime startup/shutdown hardening
 
-Status: partially done.
+Status: completed.
 
 Tasks:
 
-- [ ] Make all long-running component tasks cancel cleanly.
-- [ ] Ensure `bus.stop()` is always called.
-- [ ] Ensure Redis/Kafka clients close cleanly.
+- [x] Make all long-running component tasks cancel cleanly.
+- [x] Ensure `bus.stop()` is always called.
+- [x] Ensure Redis/Kafka clients close cleanly.
 - [x] Avoid leaked async tasks in `solve-local` subprocess path.
-- [ ] Handle `Ctrl+C` predictably.
-- [ ] Add smoke test for cancellation/shutdown.
+- [x] Handle `Ctrl+C` predictably.
+- [x] Add smoke test for cancellation/shutdown.
 
 Acceptance criteria:
 
 - [x] Repeated `solve-local` subprocess runs do not hang on shutdown.
-- [ ] `Ctrl+C` exits cleanly without stack traces in normal operation.
+- [x] `Ctrl+C` exits cleanly without stack traces in normal operation.
 
 ### P1.2 — Improve CLI usability
 
-Status: in progress.
+Status: completed.
 
 Tasks:
 
-- [ ] Add `ctfrt.cli init-workdir`.
-- [ ] Add `ctfrt.cli inspect` to print triage and routing decision without solving.
-- [ ] Add `ctfrt.cli validate-candidate` for Gate-only testing.
-- [ ] Add `--json` output mode.
+- [x] Add `ctfrt.cli init-workdir`.
+- [x] Add `ctfrt.cli inspect` to print triage and routing decision without solving.
+- [x] Add `ctfrt.cli validate-candidate` for Gate-only testing.
+- [x] Add `--json` output mode.
 - [x] Add `--timeout` to `solve-local`.
 - [x] Add trace filtering to `show-trace` and `export-trace`.
   - [x] `--latest`
   - [x] `--run-id`
 - [x] Add `summarize-trace`.
 - [x] Add `validate-trace`.
-- [ ] Add better exit codes:
-  - [ ] `0` solved.
-  - [ ] `1` not solved.
-  - [ ] `2` runtime/config error.
-  - [ ] `3` unsafe input rejected.
+- [x] Add better exit codes:
+  - [x] `0` solved.
+  - [x] `1` not solved.
+  - [x] `2` runtime/config error.
+  - [x] `3` unsafe input rejected.
 
 Acceptance criteria:
 
-- [ ] A user can diagnose triage/routing without reading code.
-- [ ] CLI output is scriptable in CI.
+- [x] A user can diagnose triage/routing without reading code.
+- [x] CLI output is scriptable in CI.
 
 ### P1.3 — Add Docker Compose for full local distributed mode
 
-Status: open.
+Status: completed.
 
 Tasks:
 
 - [x] Add or update `runtime/docker-compose.yml` for Kafka + Redis.
-- [ ] Add a `make distributed-up` or documented equivalent.
-- [ ] Add a distributed smoke test scenario.
+- [x] Add a `make distributed-up` or documented equivalent.
+- [x] Add a distributed smoke test scenario.
 - [x] Add topic list documentation.
-- [ ] Add troubleshooting section for Kafka advertised listeners.
+- [x] Add troubleshooting section for Kafka advertised listeners.
 
 Acceptance criteria:
 
-- [ ] User can start Kafka/Redis and run one submitted challenge end-to-end.
+- [x] User can start Kafka/Redis and run one submitted challenge end-to-end.
 - [x] README includes exact commands and expected output.
 
 ### P1.4 — Add first real specialist tool loop
@@ -259,21 +259,25 @@ Acceptance criteria:
 
 ### P1.5 — Add researcher/deepsearcher backend stubs
 
-Status: open.
+Status: completed.
 
 Tasks:
 
-- [ ] Implement local notes lookup backend.
-- [ ] Implement writeup corpus lookup backend.
-- [ ] Implement optional web-backed researcher adapter.
+- [x] Implement local notes lookup backend.
+- [x] Implement writeup corpus lookup backend.
+- [x] Add advisory intelligence service contracts for future adapters.
+- [x] Record `agentic-rag` as the future internal retrieval adapter.
+- [x] Record `enhanced_deep_search` as the future external research adapter.
 - [x] Keep researcher synchronous from the specialist perspective.
-- [ ] Add `ResearchResult` examples in tests.
-- [ ] Add deepsearcher escalation brief contract.
+- [x] Add `ResearchResult` examples in tests.
+- [x] Add deepsearcher escalation brief contract.
 
 Acceptance criteria:
 
-- [ ] A specialist can ask a scoped question and receive structured evidence.
-- [ ] Deepsearcher is only used when researcher cannot converge.
+- [x] A specialist can ask a scoped question and receive structured evidence.
+- [x] Advisory intelligence services have no execution authority and no Gate bypass.
+- [x] `ctfrt` boots without `agentic-rag` or `enhanced_deep_search`.
+- [x] Deepsearcher remains an escalation-only path when researcher cannot converge.
 
 ### P1.6 — Vendor or link technique corpus
 

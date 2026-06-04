@@ -20,6 +20,14 @@ from pathlib import Path
 from typing import Optional, Protocol, runtime_checkable
 
 from .contracts import Category, Task
+from .reverse_tools import (
+    ReverseArtifactSummary,
+    StaticDetailSummary,
+    analyze_artifact,
+    collect_static_detail,
+    format_reverse_summary,
+    format_static_detail,
+)
 from .workspace import resolve_artifact_path
 
 # technique vocabulary shared with cms_cag for consistent tagging/surfacing
@@ -35,6 +43,101 @@ _TECHNIQUE_VOCAB = [
 def _extract_techniques(text: str) -> list[str]:
     low = text.lower()
     return [t for t in _TECHNIQUE_VOCAB if t in low]
+
+
+def _describe_artifact(path: Path) -> str:
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        return f"- path={path}\n  read_error={exc}"
+
+    size = len(data)
+    head = data[:16]
+    if head.startswith(b"\x7fELF"):
+        kind = "elf"
+    elif head.startswith(b"MZ"):
+        kind = "pe"
+    elif head.startswith(b"\x89PNG\r\n\x1a\n"):
+        kind = "png"
+    elif all((32 <= b <= 126) or b in (9, 10, 13) for b in data[:256]):
+        kind = "text"
+    else:
+        kind = "binary"
+
+    lines = [f"- path={path}", f"  kind={kind}", f"  size={size}"]
+    if kind == "text":
+        preview = data[:1024].decode("utf-8", errors="ignore").strip().replace("\n", "\\n")
+        if preview:
+            lines.append(f"  preview={preview[:400]}")
+        return "\n".join(lines)
+
+    strings: list[str] = []
+    seen: set[str] = set()
+    for raw in _PRINTABLE_RE.findall(data):
+        text = raw.decode("latin-1", errors="ignore").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        strings.append(text)
+        if len(strings) >= 24:
+            break
+    if strings:
+        lines.append("  strings=" + " | ".join(strings[:24]))
+    lines.append(f"  head_hex={data[:64].hex()}")
+    return "\n".join(lines)
+
+
+def _resolved_artifact_context(task: Task) -> tuple[list[str], str]:
+    resolved: list[str] = []
+    sections: list[str] = []
+    for artifact in task.artifacts:
+        try:
+            path = resolve_artifact_path(
+                artifact,
+                challenge_id=task.challenge_id,
+                workdir=task.workdir or None,
+            )
+        except ValueError as exc:
+            sections.append(f"- path={artifact}\n  resolve_error={exc}")
+            continue
+        resolved.append(str(path))
+        sections.append(_describe_artifact(path))
+    return resolved, "\n".join(sections)
+
+
+def _reverse_preanalysis(task: Task) -> tuple[list[str], list[ReverseArtifactSummary], str]:
+    resolved: list[str] = []
+    summaries: list[ReverseArtifactSummary] = []
+    blocks: list[str] = []
+    for artifact in task.artifacts:
+        try:
+            path = resolve_artifact_path(
+                artifact,
+                challenge_id=task.challenge_id,
+                workdir=task.workdir or None,
+            )
+        except ValueError:
+            continue
+        resolved.append(str(path))
+        summary = analyze_artifact(path)
+        summaries.append(summary)
+        blocks.append(format_reverse_summary(summary))
+    return resolved, summaries, "\n\n".join(blocks)
+
+
+def _reverse_static_detail(
+    task: Task,
+    resolved_artifacts: list[str],
+    preanalysis: list[ReverseArtifactSummary],
+) -> tuple[list[StaticDetailSummary], str]:
+    by_path = {summary.path: summary for summary in preanalysis}
+    details: list[StaticDetailSummary] = []
+    blocks: list[str] = []
+    for resolved in resolved_artifacts:
+        detail = collect_static_detail(Path(resolved), by_path.get(resolved))
+        details.append(detail)
+        blocks.append(format_static_detail(detail))
+    return details, "\n\n".join(blocks)
 
 
 def _solve_xor_artifact(task: Task) -> EngineResult | None:
@@ -117,6 +220,15 @@ class BioBrainAdapter:
         self._identity_config = identity_config
         self._memory = memory_query
         self._pipeline = None  # built on first use
+        self._trace = None
+
+    def bind_trace(self, trace) -> "BioBrainAdapter":
+        self._trace = trace
+        return self
+
+    async def _emit(self, kind: str, payload: dict) -> None:
+        if self._trace is not None:
+            await self._trace(kind, payload)
 
     def _pipeline_kwargs(self) -> dict[str, str | None]:
         return {
@@ -144,17 +256,23 @@ class BioBrainAdapter:
             self._pipeline = BioBrain(**self._pipeline_kwargs())
         return self._pipeline
 
-    async def _run_pipeline(self, task: Task, content: str):
+    async def _run_pipeline(self, task: Task, content: str, resolved_artifacts: list[str]):
         from biobrain.core.enums import InputSource  # lazy
 
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
+        metadata = {
+            "session_id": task.challenge_id,
+            "artifacts": task.artifacts,
+            "artifact_paths": resolved_artifacts,
+            "workdir": task.workdir,
+        }
 
         def worker():
             try:
                 trace = self._ensure_pipeline().process(
                     content, InputSource.USER,
-                    {"session_id": task.challenge_id, "artifacts": task.artifacts},
+                    metadata,
                 )
             except Exception as exc:
                 if not fut.done():
@@ -170,13 +288,27 @@ class BioBrainAdapter:
         ).start()
         return await asyncio.wait_for(fut, timeout=self._timeout_s())
 
-    def _build_content(self, task: Task) -> str:
+    def _build_content(
+        self,
+        task: Task,
+        *,
+        resolved_artifacts: list[str],
+        reverse_summary: str | None = None,
+        static_detail_summary: str | None = None,
+    ) -> str:
         arts = ", ".join(task.artifacts)
+        resolved = ", ".join(resolved_artifacts) if resolved_artifacts else "(unresolved)"
         fmt = f" Flag format: {task.flag_format}." if task.flag_format else ""
+        context = reverse_summary
+        if not context:
+            _, context = _resolved_artifact_context(task)
+        if static_detail_summary:
+            context = f"{context}\n\nStatic detail:\n{static_detail_summary}"
         return (
-            f"CTF {self.category.value} task. Artifacts: {arts}.{fmt} "
-            f"Recover the flag. Use only sandboxed tools. "
-            f"Report the flag and how you reproduced it."
+            f"CTF {self.category.value} task. Artifacts: {arts}. Resolved paths: {resolved}."
+            f"{fmt} Recover the flag. Use only sandboxed tools. "
+            f"Report the flag and how you reproduced it.\n\n"
+            f"Local artifact context:\n{context}"
         )
 
     async def solve(self, task: Task) -> EngineResult:
@@ -184,9 +316,40 @@ class BioBrainAdapter:
         if local is not None:
             return local
 
-        content = self._build_content(task)
+        resolved_artifacts, summaries, reverse_summary = _reverse_preanalysis(task)
+        for summary in summaries:
+            await self._emit("reverse_preanalysis", {
+                "kind": summary.kind,
+                "size": summary.size,
+                "sha256": summary.sha256,
+                "string_count": len(summary.strings),
+                "imports_count": len(summary.imports),
+                "stripped": summary.stripped,
+                "pie": summary.pie,
+                "tools_used": summary.tools_used,
+            })
+
+        static_detail_text = None
+        if self.category == Category.reverse:
+            static_details, static_detail_text = _reverse_static_detail(task, resolved_artifacts, summaries)
+            for detail in static_details:
+                await self._emit("reverse_static_detail", {
+                    "tool_used": detail.tool_used,
+                    "line_count": detail.line_count,
+                    "truncated": detail.truncated,
+                    "anchor_count": len(detail.candidate_anchors),
+                    "compare_import_count": len(detail.imported_compare_symbols),
+                    "input_import_count": len(detail.imported_input_symbols),
+                })
+
+        content = self._build_content(
+            task,
+            resolved_artifacts=resolved_artifacts,
+            reverse_summary=reverse_summary if self.category == Category.reverse else None,
+            static_detail_summary=static_detail_text if self.category == Category.reverse else None,
+        )
         try:
-            trace = await self._run_pipeline(task, content)
+            trace = await self._run_pipeline(task, content, resolved_artifacts)
         except asyncio.TimeoutError:
             return EngineResult(
                 evidence=[f"BioBrain pipeline timed out after {self._timeout_s():g}s"],

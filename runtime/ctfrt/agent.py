@@ -119,6 +119,9 @@ class SpecialistAgent:
             return
 
         self.researcher.bind_trace(lambda kind, payload: self._trace(task.challenge_id, kind, payload))
+        bind_trace = getattr(self.engine, "bind_trace", None)
+        if callable(bind_trace):
+            bind_trace(lambda kind, payload: self._trace(task.challenge_id, kind, payload))
         try:
             await self.researcher.lookup(
                 question=f"{self.category.value} challenge {task.challenge_id}",

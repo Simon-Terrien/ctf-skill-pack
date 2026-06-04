@@ -1,0 +1,124 @@
+# Local reverse decision rules for ctfrt.
+# Upstream inspiration: ljagiello/ctf-skills `ctf-reverse` informed the broad
+# taxonomy only. Rules here are repository-local, sanitized, and aligned with
+# our current read-only pre-analysis plus bounded reverse workflow.
+
+rules:
+  - id: success_failure_strings_present
+    when:
+      strings_any: ["wrong", "correct", "success", "fail", "password", "usage"]
+    infer:
+      technique: ["string-anchor-analysis"]
+      confidence: 0.75
+    next_action: follow_string_references
+    dynamic_allowed: false
+
+  - id: compare_imports_present
+    when:
+      imports_any: ["strcmp", "strncmp", "memcmp"]
+    infer:
+      technique: ["direct-compare"]
+      confidence: 0.7
+    next_action: string_reference_analysis
+    dynamic_allowed: false
+
+  - id: input_imports_present
+    when:
+      imports_any: ["scanf", "fgets", "read", "gets", "getline", "getchar"]
+    infer:
+      technique: ["direct-compare"]
+      confidence: 0.55
+    next_action: input_path_analysis
+    dynamic_allowed: false
+
+  - id: xor_like_indicators
+    when:
+      strings_any: ["key", "secret", "xor"]
+      instructions_any: ["xor"]
+    infer:
+      technique: ["xor-transform"]
+      confidence: 0.7
+    next_action: static_detail
+    dynamic_allowed: false
+
+  - id: position_dependent_transform
+    when:
+      instructions_any: ["xor", "add", "sub", "rol", "ror"]
+      observations_any: ["index mixed into transform", "state updated per byte"]
+    infer:
+      technique: ["position-dependent-transform"]
+      confidence: 0.6
+    next_action: constraint_extraction
+    dynamic_allowed: false
+
+  - id: stripped_plus_no_symbols
+    when:
+      stripped: true
+      sections_missing_any: [".symtab"]
+    infer:
+      technique: ["stripped-binary"]
+      confidence: 0.65
+    next_action: disassembly_summary
+    dynamic_allowed: false
+
+  - id: no_strings_and_stripped
+    when:
+      stripped: true
+      strings_empty: true
+    infer:
+      technique: ["stripped-binary"]
+      confidence: 0.6
+    next_action: disassembly_summary
+    dynamic_allowed: false
+
+  - id: crypto_looking_indicators
+    when:
+      strings_any: ["aes", "rsa", "cipher", "modulus", "prime", "curve"]
+      imports_any: []
+    infer:
+      technique: ["crypto-looking"]
+      confidence: 0.7
+      handoff_candidate: crypto-attack
+    next_action: parameter_extraction
+    dynamic_allowed: false
+
+  - id: packed_indicators
+    when:
+      strings_any: ["UPX", "packed", "stub"]
+      sections_any: ["UPX0", "UPX1"]
+    infer:
+      technique: ["packed-loader"]
+      confidence: 0.85
+    next_action: unpack_analysis_later
+    dynamic_allowed: false
+
+  - id: anti_debug_indicators
+    when:
+      imports_any: ["ptrace"]
+      strings_any: ["debugger", "tracerpid", "ptrace"]
+    infer:
+      technique: ["anti-debug"]
+      confidence: 0.8
+    next_action: sandboxed_dynamic_trace_later
+    dynamic_allowed: false
+
+  - id: vm_or_bytecode_indicators
+    when:
+      kinds_any: ["bytecode", "script", "wasm", "apk"]
+      observations_any: ["dispatch loop", "opcode table", "handler table"]
+    infer:
+      technique: ["custom-vm", "bytecode-target"]
+      confidence: 0.75
+    next_action: vm_bytecode_workflow_later
+    dynamic_allowed: false
+
+  - id: pwn_like_indicators
+    when:
+      imports_any: ["gets", "strcpy", "memcpy"]
+      observations_any: ["overflow primitive", "controlled return path"]
+    infer:
+      technique: ["pwn-looking"]
+      confidence: 0.65
+      handoff_candidate: binary-pwn
+    next_action: binary_pwn_handoff_candidate
+    dynamic_allowed: false

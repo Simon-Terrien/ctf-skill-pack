@@ -1,0 +1,195 @@
+# Local reverse technique vocabulary for ctfrt.
+# Upstream inspiration: ljagiello/ctf-skills `ctf-reverse` taxonomy informed
+# category naming only. Definitions and decision content here are normalized for
+# this repository's sandbox/Gate/runtime model and were not copied blindly.
+
+techniques:
+  direct-compare:
+    description: Input is compared directly against an expected value or buffer.
+    indicators:
+      imports_any: ["strcmp", "strncmp", "memcmp"]
+      strings_any: ["wrong", "correct", "password", "try again", "access denied"]
+      observations_any: ["single validation branch", "expected buffer near compare"]
+    evidence_required:
+      - identify the compare primitive
+      - identify where candidate input reaches the compare
+      - identify the compared target or how it is derived
+    next_actions:
+      - string_reference_analysis
+      - input_path_analysis
+      - disassembly_summary
+    handoff_if_applicable: null
+    dynamic_allowed: false
+
+  string-anchor-analysis:
+    description: Meaningful strings are used as anchors to locate validation logic.
+    indicators:
+      strings_any: ["wrong", "correct", "success", "fail", "password", "usage", "key", "secret"]
+      observations_any: ["success and failure strings both present", "usage text present"]
+    evidence_required:
+      - identify at least one success or failure string
+      - connect that string to a likely branch or function
+    next_actions:
+      - follow_string_references
+      - disassembly_summary
+    handoff_if_applicable: null
+    dynamic_allowed: false
+
+  xor-transform:
+    description: Input, secret, or stored blob is transformed with XOR before comparison.
+    indicators:
+      imports_any: []
+      strings_any: ["key", "xor", "secret"]
+      instructions_any: ["xor"]
+      observations_any: ["byte-wise xor loop", "repeating key", "single-byte xor"]
+    evidence_required:
+      - identify xor loop or xor constant source
+      - identify what buffer is transformed
+      - identify how the transformed value is checked
+    next_actions:
+      - static_detail
+      - constraint_extraction
+      - disassembly_summary
+    handoff_if_applicable: null
+    dynamic_allowed: false
+
+  position-dependent-transform:
+    description: Validation depends on byte position, index-based math, or rolling state.
+    indicators:
+      imports_any: []
+      strings_any: []
+      instructions_any: ["xor", "add", "sub", "rol", "ror", "shl", "shr"]
+      observations_any: ["loop index mixed into transform", "state updated per byte"]
+    evidence_required:
+      - identify the loop structure
+      - identify index/state contribution to each byte check
+      - identify final comparison or acceptance condition
+    next_actions:
+      - static_detail
+      - constraint_extraction
+      - disassembly_summary
+    handoff_if_applicable: null
+    dynamic_allowed: false
+
+  constraint-checker:
+    description: Input is validated through multiple arithmetic, logical, or structural constraints.
+    indicators:
+      imports_any: []
+      strings_any: ["wrong", "invalid", "nope"]
+      observations_any: ["many branch checks", "accumulator checks", "table-driven validation"]
+    evidence_required:
+      - identify the constraint set
+      - identify input width and layout
+      - identify the final acceptance condition
+    next_actions:
+      - static_detail
+      - constraint_extraction
+      - solver_candidate_later
+    handoff_if_applicable: null
+    dynamic_allowed: false
+
+  stripped-binary:
+    description: Limited symbols require heavier reliance on imports, strings, and disassembly structure.
+    indicators:
+      stripped: true
+      sections_missing_any: [".symtab"]
+      observations_any: ["few or no symbols", "imports only"]
+    evidence_required:
+      - confirm stripped state
+      - identify one structural anchor: imports, strings, or rodata reference
+    next_actions:
+      - disassembly_summary
+      - input_path_analysis
+    handoff_if_applicable: null
+    dynamic_allowed: false
+
+  packed-loader:
+    description: Binary may unpack, stage, or load code dynamically before real validation.
+    indicators:
+      sections_any: ["UPX0", "UPX1"]
+      strings_any: ["UPX", "packed", "stub"]
+      observations_any: ["tiny stub with loader imports", "compressed sections"]
+    evidence_required:
+      - identify packer or loader indicators
+      - identify whether visible code is only a staging stub
+    next_actions:
+      - unpack_analysis_later
+      - sandboxed_dynamic_trace_later
+    handoff_if_applicable: null
+    dynamic_allowed: false
+
+  anti-debug:
+    description: Binary resists inspection through debugger, ptrace, timing, or integrity checks.
+    indicators:
+      imports_any: ["ptrace"]
+      strings_any: ["debugger", "ptrace", "tracerpid"]
+      observations_any: ["timing checks", "integrity checks", "signal-based control flow"]
+    evidence_required:
+      - identify the anti-analysis primitive
+      - identify where it blocks inspection or alters behavior
+    next_actions:
+      - anti_analysis_review
+      - sandboxed_dynamic_trace_later
+    handoff_if_applicable: null
+    dynamic_allowed: false
+
+  custom-vm:
+    description: Validation appears to run inside a custom interpreter or bytecode VM.
+    indicators:
+      imports_any: []
+      strings_any: ["opcode", "vm", "bytecode"]
+      observations_any: ["dispatch loop", "opcode table", "handler table"]
+    evidence_required:
+      - identify dispatch mechanism
+      - identify bytecode source
+      - identify acceptance behavior in the VM
+    next_actions:
+      - vm_bytecode_workflow_later
+      - disassembly_summary
+    handoff_if_applicable: misc
+    dynamic_allowed: false
+
+  bytecode-target:
+    description: Artifact is bytecode, script bytecode, or an interpreter-managed format rather than native machine code.
+    indicators:
+      kinds_any: ["bytecode", "script", "wasm", "apk"]
+      strings_any: ["pyc", "dex", "wasm", "class"]
+      observations_any: ["managed runtime artifact", "archive-style code container"]
+    evidence_required:
+      - identify bytecode or managed format
+      - identify available decompilation or structural path
+    next_actions:
+      - vm_bytecode_workflow_later
+      - static_detail
+    handoff_if_applicable: misc
+    dynamic_allowed: false
+
+  crypto-looking:
+    description: Reversed logic appears to implement a cryptographic primitive or mathematical check as the core blocker.
+    indicators:
+      imports_any: []
+      strings_any: ["aes", "rsa", "ec", "modulus", "prime", "cipher"]
+      observations_any: ["s-box tables", "big integer routines", "modular arithmetic"]
+    evidence_required:
+      - identify the primitive or math family
+      - extract parameters or constants
+      - explain why crypto is the true blocker
+    next_actions:
+      - crypto_handoff_candidate
+      - parameter_extraction
+    handoff_if_applicable: crypto-attack
+    dynamic_allowed: false
+
+  pwn-looking:
+    description: The real problem may be memory corruption or exploit development rather than understanding a checker.
+    indicators:
+      imports_any: ["gets", "strcpy", "memcpy"]
+      strings_any: []
+      observations_any: ["overflow primitive", "controlled return path", "heap corruption path"]
+    evidence_required:
+      - identify the corruption primitive
+      - identify why exploitation, not validation, is the blocker
+    next_actions:
+      - binary_pwn_handoff_candidate
+    handoff_if_applicable: binary-pwn
+    dynamic_allowed: false

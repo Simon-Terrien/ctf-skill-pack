@@ -42,6 +42,71 @@ CTF_KAFKA=localhost:9092 python -m ctfrt.cli submit \
 
 `submit` refuses the default in-memory bus from a separate process, because that bus is process-local. Use `solve-local` for single-process dev tests.
 
+## Local distributed mode
+
+Bring up Kafka and Redis locally:
+
+```bash
+cd runtime
+docker compose up -d
+```
+
+Start the runtime:
+
+```bash
+cd runtime
+CTF_KAFKA=localhost:9092 CTF_REDIS=redis://localhost:6379/0 PYTHONPATH=. python -m ctfrt.run
+```
+
+Submit a challenge from another terminal:
+
+```bash
+cd runtime
+printf 'noise CTF{distributed_win} end\n' > /tmp/ctf-distributed.txt
+CTF_KAFKA=localhost:9092 PYTHONPATH=. python -m ctfrt.cli submit \
+  --name distributed-smoke \
+  --category misc \
+  --artifact /tmp/ctf-distributed.txt \
+  --flag-format 'CTF\{[^}]+\}'
+```
+
+Troubleshooting Kafka advertised listeners:
+
+- If producers or consumers hang while connecting to `localhost:9092`, check that Docker is exposing port `9092` and that `KAFKA_CFG_ADVERTISED_LISTENERS=PLAINTEXT://localhost:9092` matches the host you are using.
+- If you are running Docker remotely or through a VM, change the advertised listener from `localhost` to the host-reachable IP or DNS name before starting `docker compose`.
+- If the broker starts but `submit` cannot connect, restart the stack with `docker compose down && docker compose up -d` after changing listener settings.
+
+## CLI utilities
+
+Prepare a challenge workspace without solving:
+
+```bash
+cd runtime
+PYTHONPATH=. python -m ctfrt.cli init-workdir --name seed --artifact /tmp/note.txt --json
+```
+
+Inspect triage and routing:
+
+```bash
+cd runtime
+PYTHONPATH=. python -m ctfrt.cli inspect --name seed --artifact /tmp/note.txt --json
+```
+
+Run Gate-only candidate validation:
+
+```bash
+cd runtime
+PYTHONPATH=. python -m ctfrt.cli validate-candidate \
+  --challenge-id demo \
+  --candidate 'CTF{ok}' \
+  --flag-format 'CTF\{[^}]+\}' \
+  --validation-level reproduced \
+  --local-validation passed \
+  --oracle-validation not_available \
+  --evidence 'unit reproduction' \
+  --json
+```
+
 ## Memory backend
 
 ```text

@@ -23,6 +23,8 @@ The format is intentionally lightweight and milestone-oriented for local develop
   - BioBrain constructor argument wiring
   - bounded engine timeout behavior
   - artifact-first XOR solve before BioBrain retrieval
+- Advisory intelligence service contracts in `ctfrt.intelligence` and a null-only registry in `ctfrt.agency_registry` for future `agentic-rag` and `enhanced_deep_search` adapters.
+- Contract tests proving the intelligence seam serializes cleanly and boots without either future integration repository present.
 
 ### Changed
 
