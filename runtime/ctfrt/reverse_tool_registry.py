@@ -98,7 +98,7 @@ _SPECS = [
         read_only=True,
         sandbox_required=False,
         timeout_s=_DEFAULT_TIMEOUT_S,
-        max_output_chars=_DEFAULT_MAX_OUTPUT_CHARS,
+        max_output_chars=16000,
         allowed_next_actions=["follow_string_references", "string_reference_analysis", "input_path_analysis", "disassembly_summary"],
     ),
     ReverseToolSpec(

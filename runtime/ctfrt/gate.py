@@ -43,7 +43,11 @@ class Gate:
         if c.oracle_validation == "failed":
             reasons.append("reject_oracle_failed")
 
-        if c.flag_format and c.oracle_validation == "not_available" and c.format_match is False:
+        reproduced_locally = (
+            c.validation_level == "reproduced" and c.local_validation == "passed"
+        )
+        if (c.flag_format and c.oracle_validation == "not_available"
+                and c.format_match is False and not reproduced_locally):
             reasons.append("reject_no_flag_format")
 
         if c.validation_level in ("observed", "format_ok"):

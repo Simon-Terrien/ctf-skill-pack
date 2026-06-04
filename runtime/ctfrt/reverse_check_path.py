@@ -114,7 +114,7 @@ def extract_check_path(path: Path, tool_results: list[ReverseToolResult]) -> Che
                 _unique_append(summary.nearby_windows, _window(lines, idx, radius=2))
             for back in range(max(0, idx - 4), idx):
                 prev = " ".join(lines[back].split()).lower()
-                if "call" in prev and "<" in prev and "@plt" not in prev:
+                if "call" in prev and "<" in prev and "@plt>" not in prev:
                     if len(summary.nearby_windows) >= _MAX_WINDOWS:
                         summary.truncated = True
                     else:

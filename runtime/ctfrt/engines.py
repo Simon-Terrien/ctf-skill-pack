@@ -36,6 +36,7 @@ from .reverse_decision import (
     refine_reverse_decision,
 )
 from .reverse_check_path import extract_check_path, format_check_path_summary
+from .reverse_transform_path import extract_transform_path, format_transform_path_summary
 from .reverse_tool_registry import (
     ReverseToolResult,
     format_reverse_tool_result,
@@ -168,6 +169,166 @@ def _reverse_tool_evidence(
             results.append(result)
             blocks.append(format_reverse_tool_result(result))
     return results, "\n\n".join(blocks)
+
+
+def _parse_rodata_bytes(stdout: str) -> dict[int, int]:
+    values: dict[int, int] = {}
+    for raw in stdout.splitlines():
+        parts = raw.split()
+        if len(parts) < 2:
+            continue
+        try:
+            base = int(parts[0], 16)
+        except ValueError:
+            continue
+        offset = 0
+        for token in parts[1:5]:
+            if len(token) != 8 or any(ch not in "0123456789abcdefABCDEF" for ch in token):
+                continue
+            for idx in range(0, 8, 2):
+                values[base + offset] = int(token[idx:idx + 2], 16)
+                offset += 1
+    return values
+
+
+def _solve_self_xor_compare(
+    task: Task,
+    summaries: list[ReverseArtifactSummary],
+    tool_results: list[ReverseToolResult],
+    check_path,
+    transform_path,
+) -> EngineResult | None:
+    if not check_path.compare_symbols or not check_path.candidate_calls:
+        return None
+    if "xor" not in getattr(transform_path, "operation_kinds", []):
+        return None
+    if not getattr(transform_path, "helper_calls", []):
+        return None
+
+    disassembly = next((result for result in tool_results if result.name == "objdump_disassembly" and result.stdout), None)
+    rodata = next((result for result in tool_results if result.name == "objdump_rodata" and result.stdout), None)
+    if disassembly is None or rodata is None:
+        return None
+
+    rodata_map = _parse_rodata_bytes(rodata.stdout)
+    if not rodata_map:
+        return None
+
+    helper_target = None
+    for call in getattr(transform_path, "helper_calls", []):
+        match = re.search(r"\bcall\s+([0-9a-fA-F]+)\b", call)
+        if match:
+            helper_target = int(match.group(1), 16)
+            break
+    if helper_target is None:
+        return None
+
+    lines = disassembly.stdout.splitlines()
+    entry = None
+    for idx, raw in enumerate(lines):
+        if re.match(rf"^\s*{helper_target:x}:", raw, re.IGNORECASE):
+            entry = idx
+            break
+    if entry is None:
+        return None
+
+    alloc_size = None
+    nul_offset = None
+    copy_pairs: list[tuple[int, int]] = []
+    pending_src: int | None = None
+    for raw in lines[entry: entry + 40]:
+        compact = " ".join(raw.split())
+        low = compact.lower()
+        match_alloc = re.search(r"\bmov\s+edi,0x([0-9a-f]+)\b", low)
+        if match_alloc:
+            alloc_size = int(match_alloc.group(1), 16)
+        match_nul = re.search(r"mov\s+byte ptr \[rax\+0x([0-9a-f]+)\],0x0", low)
+        if match_nul:
+            nul_offset = int(match_nul.group(1), 16)
+        if "# " in compact and ("movdqa" in low or "movaps" in low):
+            match_src = re.search(r"#\s*([0-9a-f]+)", low)
+            if match_src:
+                pending_src = int(match_src.group(1), 16)
+        if pending_src is not None and "movups" in low and "[rax" in low:
+            match_off = re.search(r"\[rax(?:\+0x([0-9a-f]+))?\]", low)
+            if match_off:
+                dest_off = int(match_off.group(1), 16) if match_off.group(1) else 0
+                copy_pairs.append((dest_off, pending_src))
+                pending_src = None
+
+    if nul_offset is None:
+        if alloc_size is None:
+            return None
+        nul_offset = max(0, alloc_size - 1)
+    length = nul_offset
+    if length <= 0 or not copy_pairs:
+        return None
+
+    buf = [0] * length
+    for dest_off, src_addr in copy_pairs:
+        for i in range(16):
+            if dest_off + i >= length:
+                break
+            if src_addr + i not in rodata_map:
+                return None
+            buf[dest_off + i] = rodata_map[src_addr + i]
+
+    xor_buf = 0
+    for value in buf:
+        xor_buf ^= value
+
+    candidate_bytes = None
+    if length % 2 == 0:
+        key = xor_buf
+        trial = bytes(value ^ key for value in buf)
+        if all(33 <= value < 127 for value in trial):
+            candidate_bytes = trial
+    else:
+        if xor_buf != 0:
+            return None
+        for key in range(256):
+            trial = bytes(value ^ key for value in buf)
+            if all(33 <= value < 127 for value in trial):
+                candidate_bytes = trial
+                break
+    if candidate_bytes is None:
+        return None
+
+    candidate = candidate_bytes.decode("latin-1")
+    success_marker = None
+    for summary in summaries:
+        for value in summary.strings:
+            low = value.lower()
+            if "cracked" in low or "great job" in low or "success" in low:
+                success_marker = value.strip()
+                break
+        if success_marker:
+            break
+    reproduction = {
+        "method": "sandbox_exec",
+        "artifact": task.artifacts[0] if task.artifacts else "",
+        "argv": [candidate],
+        "expect_exit": 0,
+    }
+    if success_marker:
+        reproduction["success_marker"] = success_marker
+
+    return EngineResult(
+        candidate=candidate,
+        evidence=[
+            f"artifact={task.artifacts[0] if task.artifacts else ''}",
+            f"helper_target=0x{helper_target:x}",
+            "reproduction=deterministic self-xor compare reconstructed from objdump_rodata + objdump_disassembly",
+        ],
+        reproduced=True,
+        reproduction=reproduction,
+        technique=["direct-compare-xor"],
+        reasoning=[
+            "identified internal helper call immediately before strcmp",
+            "reconstructed constant buffer from RIP-relative rodata loads",
+            "solved self-referential xor compare and selected printable candidate",
+        ],
+    )
 
 
 def _solve_xor_artifact(task: Task) -> EngineResult | None:
@@ -329,6 +490,7 @@ class BioBrainAdapter:
         tool_summary: str | None = None,
         refined_decision_summary: str | None = None,
         check_path_summary: str | None = None,
+        transform_path_summary: str | None = None,
     ) -> str:
         arts = ", ".join(task.artifacts)
         resolved = ", ".join(resolved_artifacts) if resolved_artifacts else "(unresolved)"
@@ -346,6 +508,8 @@ class BioBrainAdapter:
             context = f"{context}\n\n{refined_decision_summary}"
         if check_path_summary:
             context = f"{context}\n\nCheck-path summary:\n{check_path_summary}"
+        if transform_path_summary:
+            context = f"{context}\n\nTransform-path summary:\n{transform_path_summary}"
         return (
             f"CTF {self.category.value} task. Artifacts: {arts}. Resolved paths: {resolved}."
             f"{fmt} Recover the flag. Use only sandboxed tools. "
@@ -376,6 +540,8 @@ class BioBrainAdapter:
         tool_summary_text = None
         refined_decision_summary = None
         check_path_summary = None
+        transform_path_summary = None
+        deterministic = None
         if self.category == Category.reverse:
             decision = evaluate_reverse_decision(summaries)
             decision_summary = format_reverse_decision(decision)
@@ -418,6 +584,18 @@ class BioBrainAdapter:
                     check_path = extract_check_path(Path(resolved), tool_results)
                     check_path_summary = format_check_path_summary(check_path)
                     await self._emit("reverse_check_path", check_path.model_dump())
+                    transform_path = extract_transform_path(Path(resolved), tool_results, check_path)
+                    transform_path_summary = format_transform_path_summary(transform_path)
+                    await self._emit("reverse_transform_path", transform_path.model_dump())
+                    if deterministic is None:
+                        deterministic = _solve_self_xor_compare(task, summaries, tool_results, check_path, transform_path)
+            if deterministic is not None:
+                await self._emit("reverse_deterministic_candidate", {
+                    "candidate": deterministic.candidate,
+                    "technique": deterministic.technique,
+                    "reproduction": deterministic.reproduction or {},
+                })
+                return deterministic
 
         content = self._build_content(
             task,
@@ -428,6 +606,7 @@ class BioBrainAdapter:
             tool_summary=tool_summary_text if self.category == Category.reverse else None,
             refined_decision_summary=refined_decision_summary if self.category == Category.reverse else None,
             check_path_summary=check_path_summary if self.category == Category.reverse else None,
+            transform_path_summary=transform_path_summary if self.category == Category.reverse else None,
         )
         try:
             trace = await self._run_pipeline(task, content, resolved_artifacts)

@@ -22,6 +22,7 @@ from ctfrt.engines import StubReverseEngine, EngineResult
 from ctfrt.gate import Gate
 from ctfrt.memory import InMemoryWorkingMemory
 from ctfrt.reverse_check_path import extract_check_path
+from ctfrt.reverse_transform_path import extract_transform_path
 from ctfrt.reverse_decision import ReverseFactBundle, build_fact_bundle, evaluate_reverse_decision, refine_reverse_decision
 from ctfrt.reverse_tool_registry import ReverseToolResult, format_reverse_tool_result, run_reverse_tool, select_tools_for_next_actions
 from ctfrt.reverse_tools import analyze_artifact, collect_static_detail, follow_string_references
@@ -760,6 +761,65 @@ async def test_extract_check_path_keeps_helper_window_before_compare(tmp_path: P
     assert any("call 1070 <strcmp@plt>" in window for window in summary.nearby_windows)
 
 
+async def test_extract_check_path_keeps_plt_offset_helper_window(tmp_path: Path):
+    """Stripped binary: helper labeled <sym@plt+0xNNN> must not be filtered as a PLT stub."""
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    summary = extract_check_path(
+        art,
+        [
+            ReverseToolResult(
+                name="objdump_disassembly",
+                path=str(art),
+                read_only=True,
+                sandbox_required=False,
+                timeout_s=1.0,
+                stdout="\n".join([
+                    "10bf: 48 89 ef mov rdi,rbp",
+                    "10c2: e8 59 01 00 00 call 1220 <__cxa_finalize@plt+0x180>",
+                    "10c7: 48 89 ef mov rdi,rbp",
+                    "10ca: 48 89 c6 mov rsi,rax",
+                    "10d0: e8 9b ff ff ff call 1070 <strcmp@plt>",
+                ]),
+                facts={"compare_imports": ["strcmp"]},
+            )
+        ],
+    )
+    assert any("call 1220 <__cxa_finalize@plt+0x180>" in window for window in summary.nearby_windows)
+    assert any("call 1070 <strcmp@plt>" in window for window in summary.nearby_windows)
+
+
+async def test_extract_transform_path_plt_offset_label_is_not_filtered(tmp_path: Path):
+    """Stripped binary: transform_path must resolve helper labeled <sym@plt+offset>."""
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    tool_results = [
+        ReverseToolResult(
+            name="objdump_disassembly",
+            path=str(art),
+            read_only=True,
+            sandbox_required=False,
+            timeout_s=1.0,
+            stdout="\n".join([
+                "10c2: e8 59 01 00 00 call 1220 <__cxa_finalize@plt+0x180>",
+                "10d0: e8 9b ff ff ff call 1070 <strcmp@plt>",
+                "1220: 55 push rbp",
+                "122e: e8 4d fe ff ff call 1080 <malloc@plt>",
+                "1233: 66 0f 6f 05 25 0e 00 00 movdqa xmm0,XMMWORD PTR [rip+0xe25] # 2060",
+                "1280: 32 17 xor dl,BYTE PTR [rdi]",
+                "1289: 48 39 cf cmp rdi,rcx",
+                "128c: 75 f2 jne 1280 <__cxa_finalize@plt+0x1e0>",
+            ]),
+            facts={},
+        )
+    ]
+    check_path = extract_check_path(art, tool_results)
+    summary = extract_transform_path(art, tool_results, check_path)
+    assert any("__cxa_finalize@plt+0x180" in call for call in summary.helper_calls)
+    assert "xor" in summary.operation_kinds
+    assert summary.error != "no helper transform call found"
+
+
 async def test_extract_check_path_finds_branch_window(tmp_path: Path):
     art = tmp_path / "fake-elf"
     art.write_bytes(b"\x7fELF" + b"\x00" * 32)
@@ -862,6 +922,135 @@ async def test_extract_check_path_does_not_execute_or_read_artifact(tmp_path: Pa
         pathlib.Path.read_bytes = old_read_bytes
 
 
+async def test_extract_transform_path_finds_helper_and_xor_loop(tmp_path: Path):
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    tool_results = [
+        ReverseToolResult(
+            name="objdump_disassembly",
+            path=str(art),
+            read_only=True,
+            sandbox_required=False,
+            timeout_s=1.0,
+            stdout="\n".join([
+                "10c2: e8 59 01 00 00 call 1220 <sub_1220>",
+                "10d0: e8 9b ff ff ff call 1070 <strcmp@plt>",
+                "1220: 55 push rbp",
+                "122e: e8 4d fe ff ff call 1080 <malloc@plt>",
+                "1233: 66 0f 6f 05 25 0e 00 00 movdqa xmm0,XMMWORD PTR [rip+0xe25] # 2060",
+                "1254: e8 f7 fd ff ff call 1050 <strlen@plt>",
+                "1280: 32 17 xor dl,BYTE PTR [rdi]",
+                "1289: 48 39 cf cmp rdi,rcx",
+                "128c: 75 f2 jne 1280 <sub_1220+0x60>",
+            ]),
+            facts={},
+        )
+    ]
+    check_path = extract_check_path(art, tool_results)
+    summary = extract_transform_path(art, tool_results, check_path)
+    assert "sub_1220" in summary.transform_functions
+    assert "xor" in summary.operation_kinds
+    assert "malloc" in summary.operation_kinds
+    assert "strlen" in summary.operation_kinds
+    assert summary.loop_indicators
+
+
+async def test_extract_transform_path_degrades_cleanly_without_helper(tmp_path: Path):
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    tool_results = [
+        ReverseToolResult(
+            name="objdump_disassembly",
+            path=str(art),
+            read_only=True,
+            sandbox_required=False,
+            timeout_s=1.0,
+            stdout="10d0: e8 9b ff ff ff call 1070 <strcmp@plt>",
+            facts={},
+        )
+    ]
+    check_path = extract_check_path(art, tool_results)
+    summary = extract_transform_path(art, tool_results, check_path)
+    assert summary.transform_functions == []
+    assert summary.error in {"no helper transform call found", "helper transform function body not found"}
+
+
+async def test_reverse_deterministic_self_xor_solver_recovers_candidate(tmp_path: Path):
+    from ctfrt.engines import _solve_self_xor_compare
+    from ctfrt.reverse_tools import ReverseArtifactSummary
+
+    art = tmp_path / "fake-elf"
+    art.write_bytes(
+        b"\x7fELF" + b"\x00" * 64 + b"Wrong password\x00You cracked the password\x00Great job!!\x00"
+    )
+    summary = ReverseArtifactSummary(
+        path=str(art),
+        kind="elf",
+        magic="7f454c46",
+        size=art.stat().st_size,
+        sha256="deadbeef",
+        strings=["Wrong password", "You cracked the password", "Great job!!"],
+        imports=["strcmp"],
+        sections=[".text", ".rodata"],
+        stripped=True,
+        pie=True,
+        tools_used=["embedded_strings"],
+    )
+    tool_results = [
+        ReverseToolResult(
+            name="objdump_rodata",
+            path=str(art),
+            read_only=True,
+            sandbox_required=False,
+            timeout_s=1.0,
+            stdout="\n".join([
+                "Contents of section .rodata:",
+                " 2060 79476e7d 6a61476b 6c6a7776 7f476879",
+                " 2070 6a77767f 4768796b 6b6f776a 7c2d282f",
+            ]),
+            facts={"ascii_hints": ["Wrong password", "You cracked the password", "Great job!!"]},
+        ),
+        ReverseToolResult(
+            name="objdump_disassembly",
+            path=str(art),
+            read_only=True,
+            sandbox_required=False,
+            timeout_s=1.0,
+            stdout="\n".join([
+                "10c2: e8 59 01 00 00 call 1220 <sub_1220>",
+                "10d0: e8 9b ff ff ff call 1070 <strcmp@plt>",
+                "1220: 55 push rbp",
+                "1225: bf 1a 00 00 00 mov edi,0x1a",
+                "122e: e8 4d fe ff ff call 1080 <malloc@plt>",
+                "1233: 66 0f 6f 05 25 0e 00 00 movdqa xmm0,XMMWORD PTR [rip+0xe25] # 2060",
+                "123e: c6 40 19 00 mov BYTE PTR [rax+0x19],0x0",
+                "1245: 0f 11 00 movups XMMWORD PTR [rax],xmm0",
+                "1248: 66 0f 6f 05 20 0e 00 00 movdqa xmm0,XMMWORD PTR [rip+0xe20] # 2070",
+                "1250: 0f 11 40 09 movups XMMWORD PTR [rax+0x9],xmm0",
+                "1254: e8 f7 fd ff ff call 1050 <strlen@plt>",
+                "1280: 32 17 xor dl,BYTE PTR [rdi]",
+                "1289: 48 39 cf cmp rdi,rcx",
+                "128c: 75 f2 jne 1280 <sub_1220+0x60>",
+            ]),
+            facts={},
+        ),
+    ]
+    check_path = extract_check_path(art, tool_results)
+    transform_path = extract_transform_path(art, tool_results, check_path)
+    result = _solve_self_xor_compare(
+        Task(challenge_id="selfkey", category=Category.reverse, artifacts=["fake-elf"], workdir=str(tmp_path)),
+        [summary],
+        tool_results,
+        check_path,
+        transform_path,
+    )
+    assert result is not None
+    assert result.candidate == "xFo|k`Fjmkvw~Fixjjnvk},)."
+    assert result.reproduced is True
+    assert result.reproduction["method"] == "sandbox_exec"
+    assert result.reproduction["success_marker"] == "You cracked the password"
+
+
 async def test_reverse_tool_missing_degrades_cleanly(tmp_path: Path):
     import ctfrt.reverse_tool_registry as registry
 
@@ -953,15 +1142,15 @@ async def test_reverse_tool_output_is_capped(tmp_path: Path):
         def fake_run(*args, **kwargs):
             class Result:
                 returncode = 0
-                stdout = "A" * 5000
-                stderr = "B" * 5000
+                stdout = "A" * 20000
+                stderr = "B" * 20000
 
             return Result()
 
         registry.subprocess.run = fake_run
         result = run_reverse_tool(art, "objdump_disassembly")
-        assert len(result.stdout) == 4000
-        assert len(result.stderr) == 4000
+        assert len(result.stdout) == 16000
+        assert len(result.stderr) == 16000
         assert result.truncated is True
     finally:
         registry.which = old_which
@@ -1142,6 +1331,9 @@ async def test_biobrain_adapter_emits_reverse_preanalysis_trace(tmp_path: Path):
     check_path_event = next((payload for kind, payload in seen if kind == "reverse_check_path"), None)
     assert check_path_event is not None
     assert "confidence" in check_path_event
+    transform_path_event = next((payload for kind, payload in seen if kind == "reverse_transform_path"), None)
+    assert transform_path_event is not None
+    assert "confidence" in transform_path_event
 
 
 async def test_reverse_tools_do_not_execute_artifact(tmp_path: Path):
@@ -1283,7 +1475,108 @@ async def test_biobrain_prompt_contains_reverse_decision_result(tmp_path: Path):
         assert "facts=" in captured["content"]
         assert "Refined reverse decision:" in captured["content"]
         assert "Check-path summary:" in captured["content"]
+        assert "Transform-path summary:" in captured["content"]
     finally:
+        engines.run_reverse_tool = old_run_reverse_tool
+        config.settings.challenge_root = old_root
+
+
+async def test_biobrain_adapter_short_circuits_on_deterministic_reverse_candidate(tmp_path: Path):
+    from ctfrt.engines import BioBrainAdapter
+    import ctfrt.config as config
+    import ctfrt.engines as engines
+    from ctfrt.reverse_tools import StaticDetailSummary
+    from ctfrt.workspace import register_artifacts
+
+    source = tmp_path / "selfkey-src"
+    source.write_bytes(
+        b"\x7fELF" + b"\x00" * 64 + b"Wrong password\x00You cracked the password\x00Great job!!\x00"
+    )
+
+    tool_results = {
+        "objdump_rodata": ReverseToolResult(
+            name="objdump_rodata",
+            path="",
+            read_only=True,
+            sandbox_required=False,
+            timeout_s=1.0,
+            stdout="\n".join([
+                "Contents of section .rodata:",
+                " 2060 79476e7d 6a61476b 6c6a7776 7f476879",
+                " 2070 6a77767f 4768796b 6b6f776a 7c2d282f",
+            ]),
+            facts={"ascii_hints": ["Wrong password", "You cracked the password", "Great job!!"]},
+        ),
+        "objdump_disassembly": ReverseToolResult(
+            name="objdump_disassembly",
+            path="",
+            read_only=True,
+            sandbox_required=False,
+            timeout_s=1.0,
+            stdout="\n".join([
+                "10c2: e8 59 01 00 00 call 1220 <sub_1220>",
+                "10d0: e8 9b ff ff ff call 1070 <strcmp@plt>",
+                "1220: 55 push rbp",
+                "1225: bf 1a 00 00 00 mov edi,0x1a",
+                "122e: e8 4d fe ff ff call 1080 <malloc@plt>",
+                "1233: 66 0f 6f 05 25 0e 00 00 movdqa xmm0,XMMWORD PTR [rip+0xe25] # 2060",
+                "123e: c6 40 19 00 mov BYTE PTR [rax+0x19],0x0",
+                "1245: 0f 11 00 movups XMMWORD PTR [rax],xmm0",
+                "1248: 66 0f 6f 05 20 0e 00 00 movdqa xmm0,XMMWORD PTR [rip+0xe20] # 2070",
+                "1250: 0f 11 40 09 movups XMMWORD PTR [rax+0x9],xmm0",
+                "1254: e8 f7 fd ff ff call 1050 <strlen@plt>",
+                "1280: 32 17 xor dl,BYTE PTR [rdi]",
+                "1289: 48 39 cf cmp rdi,rcx",
+                "128c: 75 f2 jne 1280 <sub_1220+0x60>",
+            ]),
+            facts={"function_labels": [".text", "strcmp@plt"], "instruction_kinds": ["call", "cmp", "jne"]},
+        ),
+    }
+
+    class ShouldNotRunPipeline:
+        def process(self, *_args, **_kwargs):
+            raise AssertionError("BioBrain pipeline should not run when deterministic reverse solver succeeds")
+
+    adapter = BioBrainAdapter(Category.reverse)
+    adapter._ensure_pipeline = lambda: ShouldNotRunPipeline()
+    old_root = config.settings.challenge_root
+    old_reverse_static_detail = engines._reverse_static_detail
+    old_run_reverse_tool = engines.run_reverse_tool
+    try:
+        config.settings.challenge_root = str(tmp_path / "challenge-root")
+        workdir, artifacts = register_artifacts("selfkey", [str(source)])
+        resolved = str(Path(config.settings.challenge_root) / workdir / artifacts[0])
+
+        def fake_reverse_static_detail(_task, _resolved_artifacts, _preanalysis):
+            detail = StaticDetailSummary(
+                path=resolved,
+                tool_used="objdump",
+                line_count=10,
+                truncated=False,
+                candidate_anchors=["Wrong password", "You cracked the password"],
+            )
+            return [detail], "detail"
+
+        def fake_run_reverse_tool(path: Path, tool_name: str) -> ReverseToolResult:
+            result = tool_results[tool_name].model_copy(deep=True)
+            result.path = str(path)
+            result.command = [f"/usr/bin/{tool_name}", str(path)]
+            return result
+
+        engines._reverse_static_detail = fake_reverse_static_detail
+        engines.run_reverse_tool = fake_run_reverse_tool
+        result = await adapter.solve(Task(
+            challenge_id="selfkey",
+            workdir=workdir,
+            category=Category.reverse,
+            artifacts=artifacts,
+            flag_format=None,
+        ))
+        assert result.candidate == "xFo|k`Fjmkvw~Fixjjnvk},)."
+        assert result.reproduction["method"] == "sandbox_exec"
+        assert result.technique == ["direct-compare-xor"]
+    finally:
+        engines._reverse_static_detail = old_reverse_static_detail
         engines.run_reverse_tool = old_run_reverse_tool
         config.settings.challenge_root = old_root
 
@@ -1316,10 +1609,15 @@ TESTS = [
     test_extract_check_path_finds_compare_call,
     test_extract_check_path_infers_compare_call_without_symbol_facts,
     test_extract_check_path_keeps_helper_window_before_compare,
+    test_extract_check_path_keeps_plt_offset_helper_window,
+    test_extract_transform_path_plt_offset_label_is_not_filtered,
     test_extract_check_path_finds_branch_window,
     test_extract_check_path_includes_rodata_hints,
     test_extract_check_path_missing_symbols_degrades_cleanly,
     test_extract_check_path_does_not_execute_or_read_artifact,
+    test_extract_transform_path_finds_helper_and_xor_loop,
+    test_extract_transform_path_degrades_cleanly_without_helper,
+    test_reverse_deterministic_self_xor_solver_recovers_candidate,
     test_reverse_tool_missing_degrades_cleanly,
     test_reverse_tool_runner_uses_no_shell,
     test_reverse_tool_never_executes_artifact_directly,
@@ -1332,6 +1630,7 @@ TESTS = [
     test_reverse_tools_do_not_execute_artifact,
     test_reverse_registry_tools_do_not_execute_artifact,
     test_biobrain_prompt_contains_reverse_decision_result,
+    test_biobrain_adapter_short_circuits_on_deterministic_reverse_candidate,
 ]
 
 if __name__ == "__main__":
