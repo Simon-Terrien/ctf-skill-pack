@@ -1,9 +1,0 @@
-{"id":"f2cea631f92f","challenge_id":"cli-unsolved","category":null,"kind":"routed","payload":{"category":"misc","triage":{"type":"misc","artifact_types":["text"],"lessons":[]}},"ts":1780558561.0825422}
-{"id":"c4a269c2bdd5","challenge_id":"cli-unsolved","category":"misc","kind":"task_started","payload":{"category":"misc"},"ts":1780558561.0826006}
-{"id":"7386700e9593","challenge_id":"cli-unsolved","category":"misc","kind":"needs_engine","payload":{"reason":"no static flag and no SolveEngine attached"},"ts":1780558561.0827072}
-{"id":"214ca5450848","challenge_id":"cli-unsolved","category":null,"kind":"routed","payload":{"category":"misc","triage":{"type":"misc","artifact_types":["text"],"lessons":[]}},"ts":1780559290.0251424}
-{"id":"14c14c425ac1","challenge_id":"cli-unsolved","category":"misc","kind":"task_started","payload":{"category":"misc"},"ts":1780559290.0251997}
-{"id":"74192539193f","challenge_id":"cli-unsolved","category":"misc","kind":"needs_engine","payload":{"reason":"no static flag and no SolveEngine attached"},"ts":1780559290.0253093}
-{"id":"ba3788de36cb","challenge_id":"cli-unsolved","category":null,"kind":"routed","payload":{"category":"misc","triage":{"type":"misc","artifact_types":["text"],"lessons":[]}},"ts":1780559763.481601}
-{"id":"33596fa04a9e","challenge_id":"cli-unsolved","category":"misc","kind":"task_started","payload":{"category":"misc"},"ts":1780559763.48179}
-{"id":"0f6a7efa5830","challenge_id":"cli-unsolved","category":"misc","kind":"needs_engine","payload":{"reason":"no static flag and no SolveEngine attached"},"ts":1780559763.4819689}

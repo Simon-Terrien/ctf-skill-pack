@@ -1,5 +1,0 @@
-{"id":"892202bd55f3","challenge_id":"c39f2a5c7b1b","category":null,"kind":"routed","payload":{"category":"reverse","triage":{"type":"reverse","artifact_types":["text"],"lessons":[]}},"ts":1780495286.140278}
-{"id":"595abe259284","challenge_id":"c39f2a5c7b1b","category":"reverse","kind":"task_started","payload":{"category":"reverse"},"ts":1780495286.1403542}
-{"id":"347797791daf","challenge_id":"c39f2a5c7b1b","category":"reverse","kind":"candidate_emitted","payload":{"source":"static-artifact-scan"},"ts":1780495286.1404974}
-{"id":"4709d9eb8cca","challenge_id":"c39f2a5c7b1b","category":null,"kind":"candidate_accepted","payload":{"candidate_id":"63669661bc86","accepted":true,"status":"solved","validation_level":"reproduced","format_match":true,"local_validation":"passed","oracle_validation":"not_available","technique":["static-artifact-scan"],"evidence_count":2},"ts":1780495286.1433654}
-{"id":"8ff66ac65ade","challenge_id":"c39f2a5c7b1b","category":null,"kind":"solved","payload":{"flag":"CTF{llm_static_test}","category":"reverse","technique":["static-artifact-scan"],"source":"reverse:static-artifact-scan"},"ts":1780495286.1437302}
