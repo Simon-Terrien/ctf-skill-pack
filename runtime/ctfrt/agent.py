@@ -21,6 +21,8 @@ from .log import get_logger, kv
 
 
 _GENERIC_FLAG = re.compile(r"(?:flag|ctf|rootme|htb|hero|picoCTF)\{[^}\r\n]{1,200}\}", re.IGNORECASE)
+_MAX_TOOL_STEPS = 4   # max engine iterations before declaring no candidate
+_MAX_BARREN = 2       # consecutive barren steps before early stop
 log = get_logger(__name__)
 
 
@@ -131,54 +133,100 @@ class SpecialistAgent:
             # Tool audit already captured the failure; continue with the solve path.
             pass
 
-        await self._trace(task.challenge_id, "engine_dispatch", {"engine": type(self.engine).__name__})
-        try:
-            result = await self.engine.solve(task)
-        except Exception as exc:
-            await self._trace(task.challenge_id, "engine_error", {
-                "engine": type(self.engine).__name__,
-                "error": repr(exc),
-            })
-            return
+        # Bounded step loop: up to _MAX_TOOL_STEPS engine calls.
+        # Each step emits a Hypothesis to the memory ledger so the orchestrator
+        # (and future memory consolidation) can track reasoning progress.
+        # Two consecutive barren steps trigger early stop.
+        barren = 0
+        hypothesis_count = 0
+        engine_name = type(self.engine).__name__
 
-        if result.handoff is not None:
-            log.debug("publish topic", extra=kv(
-                topic=Topics.HANDOFFS, challenge_id=task.challenge_id, target=result.handoff.value))
-            await self.bus.publish(Topics.HANDOFFS, Handoff(
-                challenge_id=task.challenge_id, from_category=self.category,
-                target=result.handoff, reason=result.handoff_reason or "engine reclassified",
-            ), key=task.challenge_id)
-            await self._trace(task.challenge_id, "handoff", {"target": result.handoff.value})
-            return
+        for step in range(1, _MAX_TOOL_STEPS + 1):
+            await self._trace(task.challenge_id, "engine_dispatch",
+                              {"engine": engine_name, "step": step})
+            try:
+                result = await self.engine.solve(task)
+            except Exception as exc:
+                await self._trace(task.challenge_id, "engine_error", {
+                    "engine": engine_name,
+                    "step": step,
+                    "error": repr(exc),
+                })
+                return
 
-        if not result.candidate:
-            await self._trace(task.challenge_id, "engine_no_candidate",
-                              {
-                                  "reasoning": result.reasoning,
-                                  "evidence": result.evidence,
-                                  "technique": result.technique,
-                              })
-            return
+            if result.handoff is not None:
+                log.debug("publish topic", extra=kv(
+                    topic=Topics.HANDOFFS, challenge_id=task.challenge_id,
+                    target=result.handoff.value))
+                await self.bus.publish(Topics.HANDOFFS, Handoff(
+                    challenge_id=task.challenge_id, from_category=self.category,
+                    target=result.handoff, reason=result.handoff_reason or "engine reclassified",
+                ), key=task.challenge_id)
+                await self._trace(task.challenge_id, "handoff",
+                                  {"target": result.handoff.value, "step": step})
+                return
 
-        # Map engine result -> ctfrt Candidate. The engine's honest `reproduced`
-        # flag sets the proof tier; the gate still validates independently.
-        await self.bus.publish(Topics.CANDIDATES, Candidate(
-            challenge_id=task.challenge_id,
-            workdir=task.workdir,
-            candidate=result.candidate,
-            source=f"{self.category.value}:{type(self.engine).__name__}",
-            flag_format=task.flag_format,
-            validation_level="reproduced" if result.reproduced else "observed",
-            local_validation="passed" if result.reproduced else "not_attempted",
-            oracle_validation="not_available",
-            evidence=result.evidence,
-            reproduction=result.reproduction,
-            technique=result.technique,
-        ), key=task.challenge_id)
-        log.debug("publish topic", extra=kv(
-            topic=Topics.CANDIDATES, challenge_id=task.challenge_id, source=type(self.engine).__name__))
-        await self._trace(task.challenge_id, "candidate_emitted",
-                          {"source": type(self.engine).__name__, "reproduced": result.reproduced})
+            # Emit a hypothesis for each step so memory can track progress.
+            if result.evidence or result.reasoning:
+                confidence_val = "medium" if result.candidate else "low"
+                h = Hypothesis(
+                    challenge_id=task.challenge_id,
+                    category=self.category,
+                    claim=result.candidate or "; ".join(result.reasoning[:2]) or "no candidate",
+                    confidence=confidence_val,
+                    evidence=result.evidence,
+                    next_test="" if result.candidate else "retry or escalate",
+                    exit_condition="candidate confirmed" if result.candidate else "max_steps",
+                    result="confirmed" if result.candidate else "open",
+                    iterations=step,
+                )
+                try:
+                    await self.mem.upsert_hypothesis(h)
+                except Exception:
+                    pass
+                log.debug("publish topic", extra=kv(
+                    topic=Topics.HYPOTHESES, challenge_id=task.challenge_id))
+                await self.bus.publish(Topics.HYPOTHESES, h, key=task.challenge_id)
+                hypothesis_count += 1
+
+            if result.candidate:
+                # Map engine result -> ctfrt Candidate. The engine's honest
+                # `reproduced` flag sets the proof tier; gate validates independently.
+                await self.bus.publish(Topics.CANDIDATES, Candidate(
+                    challenge_id=task.challenge_id,
+                    workdir=task.workdir,
+                    candidate=result.candidate,
+                    source=f"{self.category.value}:{engine_name}",
+                    flag_format=task.flag_format,
+                    validation_level="reproduced" if result.reproduced else "observed",
+                    local_validation="passed" if result.reproduced else "not_attempted",
+                    oracle_validation="not_available",
+                    evidence=result.evidence,
+                    reproduction=result.reproduction,
+                    technique=result.technique,
+                ), key=task.challenge_id)
+                log.debug("publish topic", extra=kv(
+                    topic=Topics.CANDIDATES, challenge_id=task.challenge_id,
+                    source=engine_name))
+                await self._trace(task.challenge_id, "candidate_emitted",
+                                  {"source": engine_name, "reproduced": result.reproduced,
+                                   "step": step})
+                return
+
+            # Barren step — no candidate, no handoff.
+            barren += 1
+            if barren >= _MAX_BARREN:
+                log.info("barren stop", extra=kv(
+                    challenge_id=task.challenge_id, barren=barren, step=step))
+                break
+
+        await self._trace(task.challenge_id, "engine_no_candidate", {
+            "reasoning": "; ".join(result.reasoning) if result.reasoning else "",
+            "evidence": " | ".join(result.evidence) if result.evidence else "",
+            "technique": result.technique,
+            "hypothesis_count": hypothesis_count,
+            "steps": step,
+        })
 
     async def run(self) -> None:
         group = f"specialist-{self.category.value}"

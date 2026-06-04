@@ -1581,6 +1581,92 @@ async def test_biobrain_adapter_short_circuits_on_deterministic_reverse_candidat
         config.settings.challenge_root = old_root
 
 
+async def test_specialist_barren_loop_emits_hypothesis_and_no_candidate(tmp_path: Path):
+    """Agent bounded loop: barren engine emits hypothesis ledger + engine_no_candidate."""
+    art = tmp_path / "unknown.bin"
+    art.write_bytes(b"\x00" * 32)
+
+    barren_count = 0
+
+    class BarrenEngine:
+        category = Category.reverse
+        async def solve(self, task):
+            nonlocal barren_count
+            barren_count += 1
+            return EngineResult(
+                reasoning=["no pattern found"],
+                evidence=[f"attempt={barren_count}"],
+            )
+
+    bus = InMemoryBus()
+    mem = InMemoryWorkingMemory()
+    agent = SpecialistAgent(Category.reverse, bus, mem, None, Researcher(),
+                            engine=BarrenEngine())
+
+    traces = []
+    sub = bus.subscribe("ctf.traces", group="test")
+
+    async def collect():
+        async for raw in sub:
+            traces.append(raw)
+
+    import asyncio
+    collector = asyncio.create_task(collect())
+    await agent.handle(Task(
+        challenge_id="barren", category=Category.reverse,
+        artifacts=[str(art)], flag_format=None,
+    ))
+    await asyncio.sleep(0.05)
+    collector.cancel()
+
+    kinds = [t["kind"] for t in traces]
+    assert "engine_no_candidate" in kinds
+    no_cand = next(t for t in traces if t["kind"] == "engine_no_candidate")
+    assert no_cand["payload"]["hypothesis_count"] >= 1
+    assert no_cand["payload"]["steps"] >= 1
+
+    hypotheses = await mem.list_hypotheses("barren")
+    assert len(hypotheses) >= 1
+    assert hypotheses[0].result == "open"
+
+
+async def test_specialist_sandbox_exec_reproduced_bypasses_format_check(tmp_path: Path):
+    """Gate: sandbox_exec-verified candidate accepted even without CTF{} format."""
+    art = tmp_path / "binary"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+
+    class SandboxVerifiedEngine:
+        category = Category.reverse
+        async def solve(self, task):
+            return EngineResult(
+                candidate="correct_password_not_ctf_format",
+                evidence=["binary accepted with exit 0"],
+                reproduced=True,
+                reproduction={"method": "sandbox_exec", "artifact": str(art), "expect_exit": 0},
+                technique=["direct-compare-xor"],
+            )
+
+    bus = InMemoryBus()
+    mem = InMemoryWorkingMemory()
+    agent = SpecialistAgent(Category.reverse, bus, mem, None, Researcher(),
+                            engine=SandboxVerifiedEngine())
+    gate = Gate(bus, mem)
+
+    sub = bus.subscribe("ctf.candidates", group="test")
+    read = asyncio.create_task(sub.__anext__())
+    await asyncio.sleep(0)
+
+    await agent.handle(Task(
+        challenge_id="sandbox-bypass", category=Category.reverse,
+        artifacts=[str(art)], flag_format=r"CTF\{[^}]+\}",
+    ))
+
+    raw = await asyncio.wait_for(read, 1)
+    cand = Candidate.model_validate(raw)
+    verdict = await gate.evaluate(cand)
+    assert verdict.status == "solved"
+
+
 TESTS = [
     test_static_scan_cannot_find_xor_flag,
     test_engine_recovers_flag_and_gate_accepts,
@@ -1631,6 +1717,8 @@ TESTS = [
     test_reverse_registry_tools_do_not_execute_artifact,
     test_biobrain_prompt_contains_reverse_decision_result,
     test_biobrain_adapter_short_circuits_on_deterministic_reverse_candidate,
+    test_specialist_barren_loop_emits_hypothesis_and_no_candidate,
+    test_specialist_sandbox_exec_reproduced_bypasses_format_check,
 ]
 
 if __name__ == "__main__":

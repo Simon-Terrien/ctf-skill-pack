@@ -43,11 +43,18 @@ class Gate:
         if c.oracle_validation == "failed":
             reasons.append("reject_oracle_failed")
 
-        reproduced_locally = (
-            c.validation_level == "reproduced" and c.local_validation == "passed"
+        # sandbox_exec binary-accept is ground truth even without a CTF{} wrapper:
+        # when the binary itself verified the candidate (reproduced+local_passed) and
+        # the reproduction method is sandbox_exec, format check is secondary.
+        # reencode_xor and bare claims still require format match.
+        reproduced_via_sandbox = (
+            c.validation_level == "reproduced"
+            and c.local_validation == "passed"
+            and isinstance(c.reproduction, dict)
+            and c.reproduction.get("method") == "sandbox_exec"
         )
         if (c.flag_format and c.oracle_validation == "not_available"
-                and c.format_match is False and not reproduced_locally):
+                and c.format_match is False and not reproduced_via_sandbox):
             reasons.append("reject_no_flag_format")
 
         if c.validation_level in ("observed", "format_ok"):
