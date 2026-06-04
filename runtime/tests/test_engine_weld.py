@@ -1581,6 +1581,89 @@ async def test_biobrain_adapter_short_circuits_on_deterministic_reverse_candidat
         config.settings.challenge_root = old_root
 
 
+async def test_crypto_engine_xor_brute_force_recovers_flag(tmp_path: Path):
+    from ctfrt.engines import CryptoEngine
+
+    flag = "CTF{xor_crypto_win}"
+    key = 0xFF  # produces non-printable bytes → binary-cipher heuristic fires
+    blob = bytes(ord(c) ^ key for c in flag)
+    art = tmp_path / "challenge.bin"
+    art.write_bytes(blob)
+
+    engine = CryptoEngine()
+    result = await engine.solve(Task(
+        challenge_id="crypto-xor", category=Category.crypto,
+        artifacts=[str(art)], flag_format=r"CTF\{[^}]+\}",
+    ))
+    assert result.candidate == flag
+    assert result.reproduced is True
+    assert "xor" in result.technique
+
+
+async def test_crypto_engine_caesar_recovers_flag(tmp_path: Path):
+    from ctfrt.engines import CryptoEngine
+
+    def caesar_enc(s: str, shift: int) -> str:
+        return "".join(
+            chr((ord(c) - ord("A") + shift) % 26 + ord("A")) if c.isupper()
+            else chr((ord(c) - ord("a") + shift) % 26 + ord("a")) if c.islower()
+            else c
+            for c in s
+        )
+
+    # caesar_hint requires ≥5 all-uppercase words with no lowercase
+    plaintext = "CTF{CAESAR_SOLVED} HIDDEN MESSAGE INSIDE UPPERCASE TEXT"
+    shift = 13
+    ciphertext = caesar_enc(plaintext, shift)
+    art = tmp_path / "caesar.txt"
+    art.write_text(ciphertext)
+
+    engine = CryptoEngine()
+    result = await engine.solve(Task(
+        challenge_id="crypto-caesar", category=Category.crypto,
+        artifacts=[str(art)], flag_format=r"CTF\{[^}]+\}",
+    ))
+    assert result.candidate == "CTF{CAESAR_SOLVED}"
+    assert "caesar" in result.technique
+
+
+async def test_forensics_engine_finds_flag_in_strings(tmp_path: Path):
+    from ctfrt.engines import ForensicsEngine
+
+    art = tmp_path / "dump.bin"
+    art.write_bytes(b"\x00" * 64 + b"CTF{forensics_string_win}\x00" + b"\x00" * 32)
+
+    engine = ForensicsEngine()
+    result = await engine.solve(Task(
+        challenge_id="forensics-01", category=Category.forensics,
+        artifacts=[str(art)], flag_format=r"CTF\{[^}]+\}",
+    ))
+    assert result.candidate == "CTF{forensics_string_win}"
+    assert result.reproduced is True
+
+
+async def test_crypto_decision_rsa_fields_trigger_rsa_analysis(tmp_path: Path):
+    from ctfrt.crypto_decision import analyze_crypto_artifact, evaluate_crypto_decision
+
+    text = "n = 123456789012345678901234567890\ne = 65537\nc = 987654321098765432109876543210"
+    signals = analyze_crypto_artifact(text)
+    decision = evaluate_crypto_decision(signals)
+    assert "rsa_fields_present" in decision.matched_rules
+    assert "rsa_analysis" in decision.next_actions
+    assert "rsa" in decision.inferred_techniques
+
+
+async def test_stego_decision_png_triggers_lsb_scan(tmp_path: Path):
+    from ctfrt.stego_decision import analyze_stego_artifact, evaluate_stego_decision
+
+    png_magic = b"\x89PNG\r\n\x1a\n" + b"\x00" * 50
+    signals = analyze_stego_artifact(png_magic, "image.png")
+    decision = evaluate_stego_decision(signals)
+    assert "png_image_detected" in decision.matched_rules
+    assert "lsb_scan" in decision.next_actions
+    assert "lsb" in decision.inferred_techniques
+
+
 async def test_specialist_barren_loop_emits_hypothesis_and_no_candidate(tmp_path: Path):
     """Agent bounded loop: barren engine emits hypothesis ledger + engine_no_candidate."""
     art = tmp_path / "unknown.bin"
@@ -1719,6 +1802,11 @@ TESTS = [
     test_biobrain_adapter_short_circuits_on_deterministic_reverse_candidate,
     test_specialist_barren_loop_emits_hypothesis_and_no_candidate,
     test_specialist_sandbox_exec_reproduced_bypasses_format_check,
+    test_crypto_engine_xor_brute_force_recovers_flag,
+    test_crypto_engine_caesar_recovers_flag,
+    test_forensics_engine_finds_flag_in_strings,
+    test_crypto_decision_rsa_fields_trigger_rsa_analysis,
+    test_stego_decision_png_triggers_lsb_scan,
 ]
 
 if __name__ == "__main__":

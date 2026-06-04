@@ -662,7 +662,152 @@ def engine_for_category(category: Category) -> SolveEngine | None:
     engine_mode = os.getenv("CTF_AGENT_ENGINE", "").strip().lower()
     if engine_mode == "biobrain" and category in (Category.reverse, Category.misc):
         return BioBrainAdapter(category)
+    if engine_mode in ("biobrain", "deterministic"):
+        if category == Category.crypto:
+            return CryptoEngine()
+        if category == Category.forensics:
+            return ForensicsEngine()
     return None
+
+
+# ── Crypto engine (deterministic sub-solvers) ─────────────────────────────────
+
+class CryptoEngine:
+    """Deterministic crypto solver: XOR brute-force + Caesar + base64 decode."""
+    category = Category.crypto
+
+    async def solve(self, task: Task) -> EngineResult:
+        from .crypto_decision import analyze_crypto_artifact, evaluate_crypto_decision
+        from .crypto_tool_registry import (
+            caesar_brute_force, decode_base64_layers, xor_single_byte_brute,
+        )
+
+        for artifact in task.artifacts:
+            try:
+                path = resolve_artifact_path(
+                    artifact,
+                    challenge_id=task.challenge_id,
+                    workdir=task.workdir or None,
+                )
+                data = path.read_bytes()
+            except (OSError, ValueError):
+                continue
+            text = data.decode("latin-1", errors="ignore")
+            signals = analyze_crypto_artifact(text)
+            decision = evaluate_crypto_decision(signals)
+
+            # For compact binary artifacts with no other signals, try XOR brute-force.
+            is_likely_binary_cipher = (
+                len(data) <= 4096
+                and not signals.has_base64
+                and not signals.rsa_fields
+                and not signals.caesar_hint
+                and sum(1 for b in data if b < 32 or b > 126) > len(data) * 0.2
+            )
+            if is_likely_binary_cipher and "xor_brute_force" not in decision.next_actions:
+                decision.next_actions.append("xor_brute_force")
+
+            # XOR single-byte brute-force: iterate all 256 keys, check flag format first.
+            if "xor_brute_force" in decision.next_actions:
+                flag_re = re.compile(task.flag_format) if task.flag_format else None
+                for xkey in range(256):
+                    trial = bytes(b ^ xkey for b in data)
+                    try:
+                        s = trial.decode("utf-8")
+                    except UnicodeDecodeError:
+                        s = trial.decode("latin-1")
+                    if flag_re is not None:
+                        m = flag_re.search(s)
+                        if m:
+                            return EngineResult(
+                                candidate=m.group(0),
+                                evidence=[f"xor key=0x{xkey:02x}", f"artifact={artifact}"],
+                                reproduced=True,
+                                reproduction={"method": "xor_brute", "artifact": artifact, "key": xkey},
+                                technique=["xor"],
+                                reasoning=["single-byte XOR brute-force found flag-format match"],
+                            )
+                    elif all(32 <= ord(c) <= 126 for c in s):
+                        return EngineResult(
+                            candidate=s,
+                            evidence=[f"xor key=0x{xkey:02x}", f"artifact={artifact}"],
+                            reproduced=True,
+                            reproduction={"method": "xor_brute", "artifact": artifact, "key": xkey},
+                            technique=["xor"],
+                            reasoning=["single-byte XOR brute-force found printable plaintext"],
+                        )
+
+            # Base64 decode layers
+            if "decode_base64" in decision.next_actions and signals.has_base64:
+                result = decode_base64_layers(text)
+                final = result.facts.get("final", "")
+                if final and task.flag_format:
+                    m = re.search(task.flag_format, final)
+                    if m:
+                        return EngineResult(
+                            candidate=m.group(0),
+                            evidence=[f"base64 rounds={result.facts.get('rounds', 0)}", f"artifact={artifact}"],
+                            reproduced=True,
+                            reproduction={"method": "base64_decode", "artifact": artifact},
+                            technique=["encoding"],
+                            reasoning=["base64 decode layers extracted flag"],
+                        )
+
+            # Caesar brute-force
+            if "caesar_brute_force" in decision.next_actions:
+                for shift, plain in caesar_brute_force(text):
+                    if task.flag_format:
+                        m = re.search(task.flag_format, plain)
+                        if m:
+                            return EngineResult(
+                                candidate=m.group(0),
+                                evidence=[f"caesar shift={shift}", f"artifact={artifact}"],
+                                reproduced=True,
+                                reproduction={"method": "caesar", "artifact": artifact, "shift": shift},
+                                technique=["caesar"],
+                                reasoning=[f"Caesar shift={shift} produced flag"],
+                            )
+
+        return EngineResult(reasoning=["no deterministic crypto pattern matched"])
+
+
+# ── Forensics engine (bounded static analysis) ────────────────────────────────
+
+class ForensicsEngine:
+    """Bounded read-only forensics engine: strings + keyword extraction."""
+    category = Category.forensics
+
+    async def solve(self, task: Task) -> EngineResult:
+        from .forensics_decision import analyze_forensics_artifact, evaluate_forensics_decision
+
+        for artifact in task.artifacts:
+            try:
+                path = resolve_artifact_path(
+                    artifact,
+                    challenge_id=task.challenge_id,
+                    workdir=task.workdir or None,
+                )
+                data = path.read_bytes()
+            except (OSError, ValueError):
+                continue
+            signals = analyze_forensics_artifact(data, path.name)
+            decision = evaluate_forensics_decision(signals)
+
+            # Try to find flag directly in strings
+            text = data.decode("latin-1", errors="ignore")
+            if task.flag_format:
+                m = re.search(task.flag_format, text)
+                if m:
+                    return EngineResult(
+                        candidate=m.group(0),
+                        evidence=[f"found in strings of {path.name}", f"kind={signals.kind}"],
+                        reproduced=True,
+                        reproduction={"method": "string_search", "artifact": artifact},
+                        technique=decision.inferred_techniques,
+                        reasoning=[f"flag found via string search in {signals.kind} artifact"],
+                    )
+
+        return EngineResult(reasoning=["no flag found via forensics string extraction"])
 
 
 # ── Deterministic stub engine (tests / offline dev) ───────────────────────────
