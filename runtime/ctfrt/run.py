@@ -20,7 +20,7 @@ from .config import Topics
 from .contracts import Category, SandboxResult, TraceEvent
 from .gate import Gate
 from .engines import engine_for_category
-from .memory import make_working_memory
+from .memory import make_working_memory, make_long_term_memory
 from .orchestrator import Orchestrator
 from .agent import SpecialistAgent
 from .sandbox import run_sandboxed
@@ -110,13 +110,14 @@ async def main(component: str = "all") -> None:
     bus = make_bus()
     await bus.start()
     mem = make_working_memory()
+    ltm = make_long_term_memory()
     researcher = make_researcher()
 
     tasks: list[asyncio.Task] = []
     for _name, extra in _optional_components(component, bus):
         tasks.append(asyncio.create_task(extra.run()))
     if component in ("all", "orchestrator"):
-        tasks.append(asyncio.create_task(Orchestrator(bus, mem).run()))
+        tasks.append(asyncio.create_task(Orchestrator(bus, mem, ltm=ltm).run()))
     if component in ("all", "gate"):
         tasks.append(asyncio.create_task(Gate(bus, mem).run()))
     if component in ("all", "sandbox"):

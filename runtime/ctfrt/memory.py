@@ -120,3 +120,61 @@ class NullLongTermMemory:
 
     async def consolidate(self, challenge_id: str, lesson: dict) -> None:
         return None
+
+
+class BioBrainLongTermMemory:
+    """MemPalace-backed long-term memory via BioBrain's mempalace module.
+
+    Lazy-imported so ctfrt boots without biobrain installed. Only used when
+    CTF_LTM_BACKEND=biobrain is set. Failures are warning-only — LTM is never
+    on the critical solve path.
+    """
+
+    def __init__(self, palace_path: str | None = None):
+        import os
+        self._palace_path = palace_path or os.path.expanduser(
+            os.getenv("BIOBRAIN_PALACE_PATH", "~/.mempalace/palace")
+        )
+        self._palace = None
+
+    def _ensure_palace(self):
+        if self._palace is None:
+            from biobrain.mempalace import MemPalace  # lazy
+            self._palace = MemPalace(self._palace_path)
+        return self._palace
+
+    async def retrieve(self, signals: list[str], k: int = 5) -> list[dict]:
+        import asyncio
+        import logging
+        try:
+            palace = self._ensure_palace()
+            query = " ".join(signals)
+            loop = asyncio.get_running_loop()
+            results = await loop.run_in_executor(None, palace.retrieve, query, k)
+            return [{"text": r.text, "score": r.score} for r in results] if results else []
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "LTM retrieve failed: %s", repr(exc))
+            return []
+
+    async def consolidate(self, challenge_id: str, lesson: dict) -> None:
+        import asyncio
+        import logging
+        try:
+            palace = self._ensure_palace()
+            text = f"CTF challenge {challenge_id}: " + " ".join(
+                f"{k}={v}" for k, v in lesson.items()
+            )
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, palace.store, text)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "LTM consolidate failed: %s", repr(exc))
+
+
+def make_long_term_memory() -> NullLongTermMemory | BioBrainLongTermMemory:
+    """Factory: checks CTF_LTM_BACKEND env var."""
+    backend = os.getenv("CTF_LTM_BACKEND", "none").strip().lower()
+    if backend == "biobrain":
+        return BioBrainLongTermMemory()
+    return NullLongTermMemory()

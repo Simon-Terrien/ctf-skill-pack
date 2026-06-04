@@ -177,3 +177,20 @@ class MemoryConsumer:
                 self.memory.record_mission(
                     cid, category,
                     f"Mission {cid} {category}: candidate REJECTED ({', '.join(reasons)}).")
+
+    def consolidate(self, challenge_id: str, lesson: dict) -> None:
+        """Store a post-solve lesson in institutional memory (L1/L2 only)."""
+        techniques = lesson.get("technique", [])
+        source = lesson.get("source", "")
+        category = lesson.get("category", "")
+        tech_str = ", ".join(techniques) if techniques else "unknown technique"
+        text = (
+            f"Lesson from {challenge_id} [{category}]: solved via {tech_str}. "
+            f"Source: {source}. "
+            + (f"Evidence: {lesson.get('evidence', '')}." if lesson.get("evidence") else "")
+        )
+        try:
+            self.memory.record_mission(challenge_id, category, text)
+            log.info("lesson consolidated", extra=kv(challenge_id=challenge_id, techniques=techniques))
+        except Exception as exc:
+            log.warning("consolidate failed", extra=kv(challenge_id=challenge_id, error=repr(exc)))

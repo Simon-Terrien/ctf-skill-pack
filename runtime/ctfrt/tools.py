@@ -176,15 +176,37 @@ class DeepSearcher:
         seen = set(prior_failed or [])
         # decompose -> retrieve -> reflect loop (decomposition stubbed for you to
         # plug a planner model; structure and budget are the contract)
-        for _ in range(self._max_rounds):
-            query = goal  # TODO: planner produces next query from gaps
-            if query in seen:
+        # Round 0: primary goal search.
+        query = goal
+        seen.add(query)
+        for src, typ, text, rel in await self._web(query):
+            ledger.append({"claim": text[:200], "source": src, "reliability": rel, "query": query})
+
+        # Gap-filling rounds: extract unresolved terms from low-confidence evidence
+        # and re-query for each gap until we hit max_rounds or no new gaps.
+        for _round in range(1, self._max_rounds):
+            low_conf = [e["claim"] for e in ledger if e.get("reliability") == "low"]
+            if not low_conf and ledger:
+                break  # all evidence is medium/high confidence, done
+            # Build gap queries from terms in goal not covered by current evidence
+            covered = " ".join(e["claim"] for e in ledger).lower()
+            gap_terms = [
+                w for w in goal.split()
+                if len(w) > 4 and w.lower() not in covered
+            ]
+            if not gap_terms:
                 break
-            seen.add(query)
-            for src, typ, text, rel in await self._web(query):
-                ledger.append({"claim": text[:200], "source": src, "reliability": rel})
-            if ledger:
+            gap_query = " ".join(gap_terms[:3])
+            if gap_query in seen:
                 break
+            seen.add(gap_query)
+            gaps.append(gap_query)
+            for src, typ, text, rel in await self._web(gap_query):
+                # Deduplicate by source URL
+                if not any(e["source"] == src for e in ledger):
+                    ledger.append({"claim": text[:200], "source": src,
+                                   "reliability": rel, "query": gap_query})
+
         if not ledger:
             gaps.append(goal)
         result = {
