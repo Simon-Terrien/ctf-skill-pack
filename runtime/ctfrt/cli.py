@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import inspect
+import os
+import uuid
 from pathlib import Path
 
 from .agent import SpecialistAgent
@@ -15,7 +16,15 @@ from .gate import Gate
 from .engines import engine_for_category
 from .memory import InMemoryWorkingMemory, make_working_memory
 from .orchestrator import Orchestrator
-from .trace_recorder import iter_trace_events, summarize_trace_event, trace_path_for
+from .trace_recorder import (
+    filter_trace_events,
+    iter_trace_events,
+    latest_trace_run_id,
+    mission_trace_summary,
+    summarize_trace_event,
+    trace_path_for,
+    validate_trace_events,
+)
 from .tools import Researcher
 
 
@@ -52,6 +61,7 @@ async def solve_local(args) -> None:
     bus = InMemoryBus()
     mem = InMemoryWorkingMemory()
     researcher = Researcher()
+    run_id = uuid.uuid4().hex[:12]
     trace_dir = Path(os.getenv("CTF_TRACE_DIR", ".ctfrt/traces"))
     trace_dir.mkdir(parents=True, exist_ok=True)
     await bus.start()
@@ -59,6 +69,9 @@ async def solve_local(args) -> None:
     async def local_trace_recorder() -> None:
         async for raw in bus.subscribe(Topics.TRACES, group="cli-trace-recorder"):
             ev = TraceEvent.model_validate(raw)
+            payload = dict(ev.payload or {})
+            payload.setdefault("run_id", run_id)
+            ev = ev.model_copy(update={"payload": payload})
             path = trace_path_for(trace_dir, ev.challenge_id)
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as fh:
@@ -145,10 +158,44 @@ def _trace_dir(args) -> Path:
     return Path(args.trace_dir or os.getenv("CTF_TRACE_DIR", ".ctfrt/traces"))
 
 
+def _selected_trace_run_id(args, trace_dir: Path) -> str | None:
+    if getattr(args, "run_id", None):
+        return args.run_id
+    if getattr(args, "latest", False):
+        run_id = latest_trace_run_id(trace_dir, args.challenge_id)
+        if run_id is None:
+            raise SystemExit(f"no run_id found for {args.challenge_id}")
+        return run_id
+    return None
+
+
 def show_trace(args) -> None:
-    events = iter_trace_events(_trace_dir(args), args.challenge_id)
+    trace_dir = _trace_dir(args)
+    events = iter_trace_events(trace_dir, args.challenge_id)
+    events = filter_trace_events(events, run_id=_selected_trace_run_id(args, trace_dir))
     for ev in events:
         print(summarize_trace_event(ev))
+
+
+def summarize_trace(args) -> None:
+    trace_dir = _trace_dir(args)
+    events = iter_trace_events(trace_dir, args.challenge_id)
+    events = filter_trace_events(events, run_id=_selected_trace_run_id(args, trace_dir))
+    if not events:
+        raise SystemExit(f"no trace events found for {args.challenge_id}")
+    summary = mission_trace_summary(events)
+    technique = summary["technique"]
+    print(f"Challenge: {summary['challenge_id']}")
+    print(f"Status: {summary['status']}")
+    print(f"Category: {summary['category']}")
+    print(f"Technique: {','.join(technique) if technique else '?'}")
+    print(f"Source: {summary['source']}")
+    print(f"Engine: {summary['engine']}")
+    print(f"Tool calls: {summary['tool_calls']}")
+    print(f"Candidates emitted: {summary['candidates_emitted']}")
+    print(f"Accepted candidates: {summary['accepted_candidates']}")
+    print(f"Rejected candidates: {summary['rejected_candidates']}")
+    print(f"Final event: {summary['final_event']}")
 
 
 def export_trace(args) -> None:
@@ -157,8 +204,31 @@ def export_trace(args) -> None:
     if not src.exists():
         raise SystemExit(f"no trace file found for {args.challenge_id}: {src}")
     output = Path(args.output or src.with_suffix(".export.jsonl"))
-    output.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    events = iter_trace_events(trace_dir, args.challenge_id)
+    events = filter_trace_events(events, run_id=_selected_trace_run_id(args, trace_dir))
+    output.write_text(
+        "".join(ev.model_dump_json() + "\n" for ev in events),
+        encoding="utf-8",
+    )
     print(output)
+
+
+def validate_trace(args) -> None:
+    trace_dir = _trace_dir(args)
+    src = trace_path_for(trace_dir, args.challenge_id)
+    if not src.exists():
+        raise SystemExit(2)
+    events = iter_trace_events(trace_dir, args.challenge_id)
+    events = filter_trace_events(events, run_id=_selected_trace_run_id(args, trace_dir))
+    if not events:
+        raise SystemExit(2)
+    errors = validate_trace_events(events)
+    if errors:
+        print(f"TRACE INVALID: {args.challenge_id}")
+        for error in errors:
+            print(f"- {error}")
+        raise SystemExit(1)
+    print(f"TRACE VALID: {args.challenge_id}")
 
 
 def main() -> None:
@@ -188,13 +258,35 @@ def main() -> None:
     p = sub.add_parser("show-trace")
     p.add_argument("--challenge-id", required=True)
     p.add_argument("--trace-dir")
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--latest", action="store_true")
+    group.add_argument("--run-id")
     p.set_defaults(func=show_trace)
+
+    p = sub.add_parser("summarize-trace")
+    p.add_argument("--challenge-id", required=True)
+    p.add_argument("--trace-dir")
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--latest", action="store_true")
+    group.add_argument("--run-id")
+    p.set_defaults(func=summarize_trace)
 
     p = sub.add_parser("export-trace")
     p.add_argument("--challenge-id", required=True)
     p.add_argument("--trace-dir")
     p.add_argument("--output")
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--latest", action="store_true")
+    group.add_argument("--run-id")
     p.set_defaults(func=export_trace)
+
+    p = sub.add_parser("validate-trace")
+    p.add_argument("--challenge-id", required=True)
+    p.add_argument("--trace-dir")
+    group = p.add_mutually_exclusive_group()
+    group.add_argument("--latest", action="store_true")
+    group.add_argument("--run-id")
+    p.set_defaults(func=validate_trace)
 
     args = parser.parse_args()
     if inspect.iscoroutinefunction(args.func):

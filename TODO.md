@@ -32,16 +32,48 @@ Implemented and smoke-tested:
 - [x] Local CLI:
   - [x] `solve-local` for in-process smoke solving.
   - [x] `submit` for Kafka/distributed mode.
+  - [x] `show-trace` and `export-trace`.
+  - [x] `solve-local --timeout`.
 - [x] Sandbox hardening:
   - [x] Reject absolute artifact paths.
   - [x] Reject `../` traversal.
   - [x] Return a `SandboxResult` instead of crashing on Docker launch errors.
 - [x] Local triage based on magic bytes/extensions for ELF, PE, Mach-O, images, archives, PCAP, scripts, text/log files, HTTP hints, and crypto hints.
 - [x] Smoke test suite in `runtime/tests/smoke_runtime.py`.
+- [x] Append-only local trace persistence to `.ctfrt/traces`.
+- [x] `solve-local` subprocess no-hang behavior covered by regression tests.
+- [x] `solve-local` per-run `run_id` tagging for local traces.
+- [x] Trace filtering support:
+  - [x] `show-trace --latest`
+  - [x] `show-trace --run-id <id>`
+  - [x] `export-trace --latest`
+  - [x] `export-trace --run-id <id>`
+- [x] Engine-backed local reverse solve path:
+  - [x] `BioBrainAdapter` dispatch from `solve-local`.
+  - [x] Artifact-first XOR JSON solve for local `xor-crackme`.
+  - [x] Gate acceptance with `technique=xor,keygen-inversion`.
 - [x] Packaging hygiene:
   - [x] Canonical runtime location is `runtime/ctfrt/`.
   - [x] Exclude `__pycache__` and `.pyc` from release ZIPs.
   - [x] Avoid duplicated top-level runtime files.
+
+## Current milestone
+
+Active milestone: trace usability and local engine reliability.
+
+Validated recently:
+
+- [x] `make llm-drive LLM_ARTIFACT=/tmp/ctf-test/xor_crackme.json ...` reaches `engine_dispatch`.
+- [x] The local `biobrain` engine path emits `candidate_emitted`.
+- [x] Gate emits `candidate_accepted`.
+- [x] Final trace records `solved technique=xor,keygen-inversion`.
+- [x] Missing MemPalace is warning-only for artifact-first XOR solving.
+
+Next recommended work:
+
+- [ ] Add `summarize-trace`.
+- [ ] Add `validate-trace`.
+- [ ] Add regression ensuring every non-static engine path ends in a terminal event.
 
 ## P0 — Must fix before serious use
 
@@ -136,25 +168,25 @@ These items improve developer experience, routing quality, and reproducibility.
 
 ### P1.1 — Runtime startup/shutdown hardening
 
-Status: open.
+Status: partially done.
 
 Tasks:
 
 - [ ] Make all long-running component tasks cancel cleanly.
 - [ ] Ensure `bus.stop()` is always called.
 - [ ] Ensure Redis/Kafka clients close cleanly.
-- [ ] Avoid leaked async tasks in `solve-local`.
+- [x] Avoid leaked async tasks in `solve-local` subprocess path.
 - [ ] Handle `Ctrl+C` predictably.
 - [ ] Add smoke test for cancellation/shutdown.
 
 Acceptance criteria:
 
-- [ ] Repeated `solve-local` runs do not leave pending tasks.
+- [x] Repeated `solve-local` subprocess runs do not hang on shutdown.
 - [ ] `Ctrl+C` exits cleanly without stack traces in normal operation.
 
 ### P1.2 — Improve CLI usability
 
-Status: open.
+Status: in progress.
 
 Tasks:
 
@@ -162,7 +194,12 @@ Tasks:
 - [ ] Add `ctfrt.cli inspect` to print triage and routing decision without solving.
 - [ ] Add `ctfrt.cli validate-candidate` for Gate-only testing.
 - [ ] Add `--json` output mode.
-- [ ] Add `--timeout` to `solve-local`.
+- [x] Add `--timeout` to `solve-local`.
+- [x] Add trace filtering to `show-trace` and `export-trace`.
+  - [x] `--latest`
+  - [x] `--run-id`
+- [ ] Add `summarize-trace`.
+- [ ] Add `validate-trace`.
 - [ ] Add better exit codes:
   - [ ] `0` solved.
   - [ ] `1` not solved.
@@ -193,9 +230,9 @@ Acceptance criteria:
 
 ### P1.4 — Add first real specialist tool loop
 
-Status: open.
+Status: partially done.
 
-Problem: specialists currently have only a deterministic static scan and then emit `needs_agentic_loop`.
+Problem: specialists currently have deterministic static scan plus a bounded engine path, but category-specific tool loops remain thin.
 
 Recommended first target: `reverse`.
 
@@ -217,7 +254,7 @@ Tasks:
 
 Acceptance criteria:
 
-- [ ] A simple reverse/crackme artifact can be processed beyond static embedded-flag scan.
+- [x] A simple reverse/crackme artifact can be processed beyond static embedded-flag scan.
 - [ ] The agent emits a hypothesis ledger and a candidate only with evidence.
 
 ### P1.5 — Add researcher/deepsearcher backend stubs

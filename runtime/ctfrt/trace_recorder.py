@@ -27,6 +27,12 @@ def trace_path_for(trace_dir: str | Path, challenge_id: str) -> Path:
     return Path(trace_dir) / f"{_safe_filename(challenge_id)}.jsonl"
 
 
+def trace_run_id(ev: TraceEvent) -> str | None:
+    payload = ev.payload or {}
+    run_id = payload.get("run_id")
+    return run_id if isinstance(run_id, str) and run_id else None
+
+
 def iter_trace_events(trace_dir: str | Path, challenge_id: str) -> list[TraceEvent]:
     path = trace_path_for(trace_dir, challenge_id)
     if not path.exists():
@@ -39,9 +45,146 @@ def iter_trace_events(trace_dir: str | Path, challenge_id: str) -> list[TraceEve
     return events
 
 
+def latest_trace_run_id(trace_dir: str | Path, challenge_id: str) -> str | None:
+    latest = None
+    for ev in iter_trace_events(trace_dir, challenge_id):
+        run_id = trace_run_id(ev)
+        if run_id is not None:
+            latest = run_id
+    return latest
+
+
+def filter_trace_events(events: list[TraceEvent], *, run_id: str | None = None) -> list[TraceEvent]:
+    if run_id is None:
+        return events
+    return [ev for ev in events if trace_run_id(ev) == run_id]
+
+
+def validate_trace_events(events: list[TraceEvent]) -> list[str]:
+    errors: list[str] = []
+    if not events:
+        return ["trace is empty"]
+
+    kinds = [ev.kind for ev in events]
+    kind_set = set(kinds)
+
+    if "routed" not in kind_set:
+        errors.append("missing routed")
+    if "task_started" not in kind_set:
+        errors.append("missing task_started")
+
+    terminal_engine_events = {"candidate_emitted", "engine_no_candidate", "engine_error", "handoff"}
+    needs_engine_indexes = [idx for idx, kind in enumerate(kinds) if kind == "needs_engine"]
+    for idx in needs_engine_indexes:
+        if "task_started" in kinds[:idx] and not any(kind in terminal_engine_events for kind in kinds[idx + 1:]):
+            errors.append("missing terminal engine event after needs_engine")
+            break
+
+    if "candidate_accepted" in kind_set and "solved" not in kind_set:
+        errors.append("missing solved after candidate_accepted")
+
+    if "solved" in kind_set and "candidate_accepted" not in kind_set:
+        errors.append("missing candidate_accepted before solved")
+
+    if "solved" in kind_set:
+        summary = mission_trace_summary(events)
+        technique = summary.get("technique") or []
+        source = summary.get("source")
+        if not technique and source in {None, "", "?"}:
+            errors.append("missing technique or source in solved summary")
+
+    if kind_set.issubset({"routed", "task_started", "needs_engine"}) and "needs_engine" in kind_set:
+        errors.append("trace ends at needs_engine without terminal engine event")
+
+    return errors
+
+
+def mission_trace_summary(events: list[TraceEvent]) -> dict[str, object]:
+    if not events:
+        return {
+            "challenge_id": "",
+            "status": "UNKNOWN",
+            "category": "?",
+            "technique": [],
+            "source": "?",
+            "engine": "?",
+            "tool_calls": 0,
+            "candidates_emitted": 0,
+            "accepted_candidates": 0,
+            "rejected_candidates": 0,
+            "final_event": "?",
+        }
+
+    challenge_id = events[0].challenge_id
+    category = "?"
+    technique: list[str] = []
+    source = "?"
+    engine = "?"
+    tool_calls = 0
+    candidates_emitted = 0
+    accepted_candidates = 0
+    rejected_candidates = 0
+    final_event = events[-1].kind
+
+    for ev in events:
+        payload = ev.payload or {}
+        if ev.kind == "routed" and payload.get("category"):
+            category = str(payload["category"])
+        elif ev.category is not None and category == "?":
+            category = ev.category.value
+
+        if ev.kind == "tool_call_started":
+            tool_calls += 1
+        elif ev.kind == "candidate_emitted":
+            candidates_emitted += 1
+        elif ev.kind == "candidate_accepted":
+            accepted_candidates += 1
+            if payload.get("technique"):
+                technique = list(payload["technique"])
+        elif ev.kind == "candidate_rejected":
+            rejected_candidates += 1
+        elif ev.kind == "engine_dispatch" and payload.get("engine"):
+            engine = str(payload["engine"])
+        elif ev.kind == "solved":
+            if payload.get("technique"):
+                technique = list(payload["technique"])
+            if payload.get("source"):
+                source = str(payload["source"])
+
+    status = final_event.upper()
+    if final_event == "solved":
+        status = "SOLVED"
+    elif final_event == "candidate_rejected":
+        status = "REJECTED"
+    elif final_event == "engine_no_candidate":
+        status = "ENGINE_NO_CANDIDATE"
+    elif final_event == "engine_error":
+        status = "ENGINE_ERROR"
+
+    if source != "?" and ":" in source and engine == "?":
+        engine = source.split(":", 1)[1]
+
+    return {
+        "challenge_id": challenge_id,
+        "status": status,
+        "category": category,
+        "technique": technique,
+        "source": source,
+        "engine": engine,
+        "tool_calls": tool_calls,
+        "candidates_emitted": candidates_emitted,
+        "accepted_candidates": accepted_candidates,
+        "rejected_candidates": rejected_candidates,
+        "final_event": final_event,
+    }
+
+
 def summarize_trace_event(ev: TraceEvent) -> str:
     payload = ev.payload or {}
     bits = [ev.kind]
+    run_id = trace_run_id(ev)
+    if run_id:
+        bits.insert(0, f"run={run_id}")
     if ev.kind in {"candidate_accepted", "gate_verdict"}:
         bits.append(f"status={payload.get('status', '?')}")
         if "accepted" in payload:

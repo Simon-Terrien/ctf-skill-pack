@@ -319,8 +319,385 @@ def test_trace_cli_show_and_export(tmp_path: Path):
         "--trace-dir", str(tmp_path),
         "--output", str(exported),
     ], text=True, env=env).strip()
-    assert exported.read_text(encoding="utf-8").strip() == trace_file.read_text(encoding="utf-8").strip()
+    exported_rows = [
+        json.loads(line) for line in exported.read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
+    assert len(exported_rows) == 1
+    assert exported_rows[0]["challenge_id"] == "rev-001"
+    assert exported_rows[0]["kind"] == "solved"
+    assert exported_rows[0]["payload"] == {"technique": ["xor"], "source": "reverse:Stub"}
     assert result == str(exported)
+
+
+def test_trace_cli_show_and_export_support_run_filters(tmp_path: Path):
+    artifact = tmp_path / "note.txt"
+    artifact.write_text("noise CTF{cli_static_win} end")
+    trace_dir = tmp_path / "traces"
+
+    first = _run_solve_local_subprocess(
+        name="trace-repeat",
+        artifact=artifact,
+        flag_format=r"CTF\{[^}]+\}",
+        timeout=5,
+        trace_dir=trace_dir,
+    )
+    second = _run_solve_local_subprocess(
+        name="trace-repeat",
+        artifact=artifact,
+        flag_format=r"CTF\{[^}]+\}",
+        timeout=5,
+        trace_dir=trace_dir,
+    )
+    assert first.returncode == 0
+    assert second.returncode == 0
+
+    events = iter_trace_events(trace_dir, "trace-repeat")
+    run_ids = []
+    for ev in events:
+        run_id = ev.payload.get("run_id")
+        if run_id and run_id not in run_ids:
+            run_ids.append(run_id)
+    assert len(run_ids) == 2
+    first_run, second_run = run_ids
+    assert first_run != second_run
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "runtime"
+    show_all = subprocess.check_output([
+        sys.executable, "-m", "ctfrt.cli", "show-trace",
+        "--challenge-id", "trace-repeat",
+        "--trace-dir", str(trace_dir),
+    ], text=True, env=env)
+    assert f"run={first_run}" in show_all
+    assert f"run={second_run}" in show_all
+
+    show_latest = subprocess.check_output([
+        sys.executable, "-m", "ctfrt.cli", "show-trace",
+        "--challenge-id", "trace-repeat",
+        "--trace-dir", str(trace_dir),
+        "--latest",
+    ], text=True, env=env)
+    assert f"run={second_run}" in show_latest
+    assert f"run={first_run}" not in show_latest
+
+    show_first = subprocess.check_output([
+        sys.executable, "-m", "ctfrt.cli", "show-trace",
+        "--challenge-id", "trace-repeat",
+        "--trace-dir", str(trace_dir),
+        "--run-id", first_run,
+    ], text=True, env=env)
+    assert f"run={first_run}" in show_first
+    assert f"run={second_run}" not in show_first
+
+    latest_export = tmp_path / "latest.jsonl"
+    exported_latest = subprocess.check_output([
+        sys.executable, "-m", "ctfrt.cli", "export-trace",
+        "--challenge-id", "trace-repeat",
+        "--trace-dir", str(trace_dir),
+        "--latest",
+        "--output", str(latest_export),
+    ], text=True, env=env).strip()
+    assert exported_latest == str(latest_export)
+    latest_events = latest_export.read_text(encoding="utf-8").splitlines()
+    assert latest_events
+    assert all(f'"run_id":"{second_run}"' in line for line in latest_events)
+
+
+def test_trace_cli_summarize_trace(tmp_path: Path):
+    trace_file = tmp_path / "xor-clean.jsonl"
+    trace_file.write_text(
+        "\n".join([
+            json.dumps({
+                "challenge_id": "xor-clean",
+                "kind": "routed",
+                "payload": {"category": "reverse", "run_id": "run-1"},
+            }),
+            json.dumps({
+                "challenge_id": "xor-clean",
+                "kind": "task_started",
+                "category": "reverse",
+                "payload": {"category": "reverse", "run_id": "run-1"},
+            }),
+            json.dumps({
+                "challenge_id": "xor-clean",
+                "kind": "tool_call_started",
+                "payload": {"tool": "researcher.lookup", "run_id": "run-1"},
+            }),
+            json.dumps({
+                "challenge_id": "xor-clean",
+                "kind": "tool_call_finished",
+                "payload": {"tool": "researcher.lookup", "ok": True, "run_id": "run-1"},
+            }),
+            json.dumps({
+                "challenge_id": "xor-clean",
+                "kind": "engine_dispatch",
+                "payload": {"engine": "BioBrainAdapter", "run_id": "run-1"},
+            }),
+            json.dumps({
+                "challenge_id": "xor-clean",
+                "kind": "candidate_emitted",
+                "payload": {"source": "BioBrainAdapter", "run_id": "run-1"},
+            }),
+            json.dumps({
+                "challenge_id": "xor-clean",
+                "kind": "candidate_accepted",
+                "payload": {
+                    "accepted": True,
+                    "status": "solved",
+                    "technique": ["xor", "keygen-inversion"],
+                    "run_id": "run-1",
+                },
+            }),
+            json.dumps({
+                "challenge_id": "xor-clean",
+                "kind": "solved",
+                "payload": {
+                    "category": "reverse",
+                    "technique": ["xor", "keygen-inversion"],
+                    "source": "reverse:BioBrainAdapter",
+                    "run_id": "run-1",
+                },
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "runtime"
+    out = subprocess.check_output([
+        sys.executable, "-m", "ctfrt.cli", "summarize-trace",
+        "--challenge-id", "xor-clean",
+        "--trace-dir", str(tmp_path),
+    ], text=True, env=env)
+    assert "Status: SOLVED" in out
+    assert "Technique: xor,keygen-inversion" in out
+    assert "Tool calls: 1" in out
+    assert "Candidates emitted: 1" in out
+    assert "Accepted candidates: 1" in out
+    assert "Engine: BioBrainAdapter" in out
+
+
+def test_trace_cli_summarize_trace_supports_run_filters(tmp_path: Path):
+    trace_file = tmp_path / "xor-clean.jsonl"
+    rows = [
+        {"challenge_id": "xor-clean", "kind": "routed", "payload": {"category": "reverse", "run_id": "run-1"}},
+        {"challenge_id": "xor-clean", "kind": "task_started", "payload": {"category": "reverse", "run_id": "run-1"}},
+        {"challenge_id": "xor-clean", "kind": "engine_dispatch", "payload": {"engine": "StubEngine", "run_id": "run-1"}},
+        {"challenge_id": "xor-clean", "kind": "candidate_emitted", "payload": {"run_id": "run-1"}},
+        {"challenge_id": "xor-clean", "kind": "candidate_accepted", "payload": {"accepted": True, "status": "solved", "technique": ["strings-analysis"], "run_id": "run-1"}},
+        {"challenge_id": "xor-clean", "kind": "solved", "payload": {"category": "reverse", "technique": ["strings-analysis"], "source": "reverse:StubEngine", "run_id": "run-1"}},
+        {"challenge_id": "xor-clean", "kind": "routed", "payload": {"category": "reverse", "run_id": "run-2"}},
+        {"challenge_id": "xor-clean", "kind": "task_started", "payload": {"category": "reverse", "run_id": "run-2"}},
+        {"challenge_id": "xor-clean", "kind": "tool_call_started", "payload": {"tool": "researcher.lookup", "run_id": "run-2"}},
+        {"challenge_id": "xor-clean", "kind": "tool_call_finished", "payload": {"tool": "researcher.lookup", "ok": True, "run_id": "run-2"}},
+        {"challenge_id": "xor-clean", "kind": "engine_dispatch", "payload": {"engine": "BioBrainAdapter", "run_id": "run-2"}},
+        {"challenge_id": "xor-clean", "kind": "candidate_emitted", "payload": {"run_id": "run-2"}},
+        {"challenge_id": "xor-clean", "kind": "candidate_accepted", "payload": {"accepted": True, "status": "solved", "technique": ["xor", "keygen-inversion"], "run_id": "run-2"}},
+        {"challenge_id": "xor-clean", "kind": "solved", "payload": {"category": "reverse", "technique": ["xor", "keygen-inversion"], "source": "reverse:BioBrainAdapter", "run_id": "run-2"}},
+    ]
+    trace_file.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "runtime"
+
+    latest = subprocess.check_output([
+        sys.executable, "-m", "ctfrt.cli", "summarize-trace",
+        "--challenge-id", "xor-clean",
+        "--trace-dir", str(tmp_path),
+        "--latest",
+    ], text=True, env=env)
+    assert "Technique: xor,keygen-inversion" in latest
+    assert "Engine: BioBrainAdapter" in latest
+    assert "Tool calls: 1" in latest
+
+    first = subprocess.check_output([
+        sys.executable, "-m", "ctfrt.cli", "summarize-trace",
+        "--challenge-id", "xor-clean",
+        "--trace-dir", str(tmp_path),
+        "--run-id", "run-1",
+    ], text=True, env=env)
+    assert "Technique: strings-analysis" in first
+    assert "Engine: StubEngine" in first
+    assert "Tool calls: 0" in first
+
+
+def test_trace_cli_validate_trace_valid_solved_returns_0(tmp_path: Path):
+    trace_file = tmp_path / "xor-clean.jsonl"
+    trace_file.write_text(
+        "\n".join([
+            json.dumps({
+                "challenge_id": "xor-clean",
+                "kind": "routed",
+                "payload": {"category": "reverse", "run_id": "run-1"},
+            }),
+            json.dumps({
+                "challenge_id": "xor-clean",
+                "kind": "task_started",
+                "payload": {"category": "reverse", "run_id": "run-1"},
+            }),
+            json.dumps({
+                "challenge_id": "xor-clean",
+                "kind": "needs_engine",
+                "payload": {"run_id": "run-1"},
+            }),
+            json.dumps({
+                "challenge_id": "xor-clean",
+                "kind": "candidate_emitted",
+                "payload": {"run_id": "run-1"},
+            }),
+            json.dumps({
+                "challenge_id": "xor-clean",
+                "kind": "candidate_accepted",
+                "payload": {
+                    "accepted": True,
+                    "status": "solved",
+                    "technique": ["xor", "keygen-inversion"],
+                    "run_id": "run-1",
+                },
+            }),
+            json.dumps({
+                "challenge_id": "xor-clean",
+                "kind": "solved",
+                "payload": {
+                    "technique": ["xor", "keygen-inversion"],
+                    "source": "reverse:BioBrainAdapter",
+                    "run_id": "run-1",
+                },
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "runtime"
+    result = subprocess.run([
+        sys.executable, "-m", "ctfrt.cli", "validate-trace",
+        "--challenge-id", "xor-clean",
+        "--trace-dir", str(tmp_path),
+    ], text=True, capture_output=True, env=env)
+    assert result.returncode == 0
+    assert result.stdout.strip() == "TRACE VALID: xor-clean"
+
+
+def test_trace_cli_validate_trace_needs_engine_only_returns_1(tmp_path: Path):
+    trace_file = tmp_path / "xor-clean.jsonl"
+    trace_file.write_text(
+        "\n".join([
+            json.dumps({
+                "challenge_id": "xor-clean",
+                "kind": "routed",
+                "payload": {"category": "reverse", "run_id": "run-1"},
+            }),
+            json.dumps({
+                "challenge_id": "xor-clean",
+                "kind": "task_started",
+                "payload": {"category": "reverse", "run_id": "run-1"},
+            }),
+            json.dumps({
+                "challenge_id": "xor-clean",
+                "kind": "needs_engine",
+                "payload": {"run_id": "run-1"},
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "runtime"
+    result = subprocess.run([
+        sys.executable, "-m", "ctfrt.cli", "validate-trace",
+        "--challenge-id", "xor-clean",
+        "--trace-dir", str(tmp_path),
+    ], text=True, capture_output=True, env=env)
+    assert result.returncode == 1
+    assert "TRACE INVALID: xor-clean" in result.stdout
+    assert "- missing terminal engine event after needs_engine" in result.stdout
+
+
+def test_trace_cli_validate_trace_candidate_accepted_without_solved_returns_1(tmp_path: Path):
+    trace_file = tmp_path / "xor-clean.jsonl"
+    trace_file.write_text(
+        "\n".join([
+            json.dumps({
+                "challenge_id": "xor-clean",
+                "kind": "routed",
+                "payload": {"category": "reverse", "run_id": "run-1"},
+            }),
+            json.dumps({
+                "challenge_id": "xor-clean",
+                "kind": "task_started",
+                "payload": {"category": "reverse", "run_id": "run-1"},
+            }),
+            json.dumps({
+                "challenge_id": "xor-clean",
+                "kind": "candidate_emitted",
+                "payload": {"run_id": "run-1"},
+            }),
+            json.dumps({
+                "challenge_id": "xor-clean",
+                "kind": "candidate_accepted",
+                "payload": {
+                    "accepted": True,
+                    "status": "solved",
+                    "run_id": "run-1",
+                },
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "runtime"
+    result = subprocess.run([
+        sys.executable, "-m", "ctfrt.cli", "validate-trace",
+        "--challenge-id", "xor-clean",
+        "--trace-dir", str(tmp_path),
+    ], text=True, capture_output=True, env=env)
+    assert result.returncode == 1
+    assert "TRACE INVALID: xor-clean" in result.stdout
+    assert "- missing solved after candidate_accepted" in result.stdout
+
+
+def test_trace_cli_validate_trace_missing_trace_returns_2(tmp_path: Path):
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "runtime"
+    result = subprocess.run([
+        sys.executable, "-m", "ctfrt.cli", "validate-trace",
+        "--challenge-id", "xor-clean",
+        "--trace-dir", str(tmp_path),
+    ], text=True, capture_output=True, env=env)
+    assert result.returncode == 2
+
+
+def test_trace_cli_validate_trace_latest_validates_only_latest_run_id(tmp_path: Path):
+    trace_file = tmp_path / "xor-clean.jsonl"
+    rows = [
+        {"challenge_id": "xor-clean", "kind": "routed", "payload": {"category": "reverse", "run_id": "run-1"}},
+        {"challenge_id": "xor-clean", "kind": "task_started", "payload": {"category": "reverse", "run_id": "run-1"}},
+        {"challenge_id": "xor-clean", "kind": "needs_engine", "payload": {"run_id": "run-1"}},
+        {"challenge_id": "xor-clean", "kind": "candidate_emitted", "payload": {"run_id": "run-1"}},
+        {"challenge_id": "xor-clean", "kind": "candidate_accepted", "payload": {"accepted": True, "status": "solved", "technique": ["strings-analysis"], "run_id": "run-1"}},
+        {"challenge_id": "xor-clean", "kind": "solved", "payload": {"technique": ["strings-analysis"], "source": "reverse:StubEngine", "run_id": "run-1"}},
+        {"challenge_id": "xor-clean", "kind": "routed", "payload": {"category": "reverse", "run_id": "run-2"}},
+        {"challenge_id": "xor-clean", "kind": "task_started", "payload": {"category": "reverse", "run_id": "run-2"}},
+        {"challenge_id": "xor-clean", "kind": "needs_engine", "payload": {"run_id": "run-2"}},
+    ]
+    trace_file.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "runtime"
+
+    latest = subprocess.run([
+        sys.executable, "-m", "ctfrt.cli", "validate-trace",
+        "--challenge-id", "xor-clean",
+        "--trace-dir", str(tmp_path),
+        "--latest",
+    ], text=True, capture_output=True, env=env)
+    assert latest.returncode == 1
+    assert "- missing terminal engine event after needs_engine" in latest.stdout
+
+    first = subprocess.run([
+        sys.executable, "-m", "ctfrt.cli", "validate-trace",
+        "--challenge-id", "xor-clean",
+        "--trace-dir", str(tmp_path),
+        "--run-id", "run-1",
+    ], text=True, capture_output=True, env=env)
+    assert first.returncode == 0
+    assert first.stdout.strip() == "TRACE VALID: xor-clean"
 
 
 async def test_runtime_optional_components_do_not_require_cms_by_default(tmp_path: Path):
@@ -484,6 +861,12 @@ TESTS = [
     test_sandbox_worker_traces_request_and_result,
     test_trace_recorder_persists_solved_trace,
     test_trace_cli_show_and_export,
+    test_trace_cli_show_and_export_support_run_filters,
+    test_trace_cli_validate_trace_valid_solved_returns_0,
+    test_trace_cli_validate_trace_needs_engine_only_returns_1,
+    test_trace_cli_validate_trace_candidate_accepted_without_solved_returns_1,
+    test_trace_cli_validate_trace_missing_trace_returns_2,
+    test_trace_cli_validate_trace_latest_validates_only_latest_run_id,
     test_runtime_optional_components_do_not_require_cms_by_default,
     test_runtime_optional_memory_component_starts_when_cms_available,
     test_cli_solve_local_subprocess_exits_cleanly,
