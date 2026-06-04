@@ -23,6 +23,7 @@ from typing import Awaitable, Callable
 
 from .contracts import Candidate, SandboxRequest, SandboxResult
 from .log import get_logger, kv
+from .workspace import resolve_artifact_path
 
 log = get_logger(__name__)
 
@@ -53,7 +54,12 @@ class Verifier:
     def _verify_reencode_xor(self, c: Candidate, recipe: dict) -> bool:
         art = recipe.get("artifact")
         try:
-            spec = json.loads(Path(art).read_text())
+            path = resolve_artifact_path(
+                art,
+                challenge_id=c.challenge_id,
+                workdir=c.workdir or None,
+            )
+            spec = json.loads(path.read_text())
             key, blob_hex = spec["xor_key"], spec["blob_hex"]
         except (OSError, ValueError, KeyError, TypeError):
             return False
@@ -68,6 +74,7 @@ class Verifier:
         runner = self._runner or _default_runner()
         res = await runner(SandboxRequest(
             challenge_id=c.challenge_id,
+            workdir=c.workdir,
             artifact=recipe.get("artifact", ""),
             argv=recipe.get("argv", []),
             stdin=c.candidate.encode(),

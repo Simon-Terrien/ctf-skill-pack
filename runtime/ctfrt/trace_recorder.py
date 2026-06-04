@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .config import Topics
 from .contracts import TraceEvent
-from .log import get_logger, kv
+from .log import get_logger, kv, sanitize
 
 log = get_logger(__name__)
 
@@ -221,6 +221,8 @@ class TraceRecorder:
         return trace_path_for(self.trace_dir, challenge_id)
 
     def _append(self, ev: TraceEvent) -> None:
+        payload = sanitize(ev.payload or {})
+        ev = ev.model_copy(update={"payload": payload})
         path = self._path_for(ev.challenge_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as fh:
@@ -229,7 +231,7 @@ class TraceRecorder:
 
     async def record(self, ev: TraceEvent) -> None:
         async with self._lock:
-            await asyncio.to_thread(self._append, ev)
+            self._append(ev)
 
     async def run(self) -> None:
         async for raw in self.bus.subscribe(Topics.TRACES, group="trace-recorder"):

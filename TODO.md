@@ -71,8 +71,8 @@ Validated recently:
 
 Next recommended work:
 
-- [ ] Add `summarize-trace`.
-- [ ] Add `validate-trace`.
+- [x] Add `summarize-trace`.
+- [x] Add `validate-trace`.
 - [ ] Add regression ensuring every non-static engine path ends in a terminal event.
 
 ## P0 — Must fix before serious use
@@ -81,86 +81,86 @@ These items affect correctness, isolation, or the ability to trust runtime outpu
 
 ### P0.1 — Add structured runtime logging
 
-Status: open.
+Status: completed.
 
 Problem: distributed mode is too quiet. If Kafka/Redis routing fails, debugging is harder than necessary.
 
 Tasks:
 
-- [ ] Add consistent structured logs to `run.py`, `orchestrator.py`, `agent.py`, `gate.py`, `sandbox.py`, and `cli.py`.
-- [ ] Log component startup/shutdown.
-- [ ] Log topic subscriptions and publications at debug level.
-- [ ] Log candidate verdicts with challenge ID, candidate ID, status, validation level, and rejection reasons.
-- [ ] Add `CTF_LOG_LEVEL` environment variable.
-- [ ] Keep flag values redacted by default unless `CTF_DEBUG_FLAGS=1` is set.
+- [x] Add consistent structured logs to `run.py`, `orchestrator.py`, `agent.py`, `gate.py`, `sandbox.py`, and `cli.py`.
+- [x] Log component startup/shutdown.
+- [x] Log topic subscriptions and publications at debug level.
+- [x] Log candidate verdicts with challenge ID, candidate ID, status, validation level, and rejection reasons.
+- [x] Add `CTF_LOG_LEVEL` environment variable.
+- [x] Keep flag values redacted by default unless `CTF_DEBUG_FLAGS=1` is set.
 
 Acceptance criteria:
 
-- [ ] Running `python -m ctfrt.cli solve-local ...` shows a clear high-level event trail.
-- [ ] Running Kafka mode shows which component consumed and published each major message.
-- [ ] Logs do not leak flags by default.
+- [x] Running `python -m ctfrt.cli solve-local ...` shows a clear high-level event trail.
+- [x] Running Kafka mode shows which component consumed and published each major message.
+- [x] Logs do not leak flags by default.
 
 ### P0.2 — Define a safe artifact workspace model
 
-Status: open.
+Status: completed.
 
 Problem: artifacts are currently passed as paths. Path traversal is blocked at sandbox execution, but the broader challenge workspace model is still loose.
 
 Tasks:
 
-- [ ] Add an explicit `Challenge.workdir` or `Artifact` contract.
-- [ ] Store artifacts relative to the challenge workspace.
-- [ ] Ensure every artifact path resolves under the challenge workspace.
-- [ ] Reject symlink escape from the workspace.
-- [ ] Normalize paths once at challenge ingestion.
-- [ ] Update CLI to copy or register artifacts into a challenge workspace.
+- [x] Add an explicit `Challenge.workdir` or `Artifact` contract.
+- [x] Store artifacts relative to the challenge workspace.
+- [x] Ensure every artifact path resolves under the challenge workspace.
+- [x] Reject symlink escape from the workspace.
+- [x] Normalize paths once at challenge ingestion.
+- [x] Update CLI to copy or register artifacts into a challenge workspace.
 
 Acceptance criteria:
 
-- [ ] No runtime component needs to trust arbitrary absolute paths from a message.
-- [ ] Path traversal and symlink traversal are rejected before sandbox or specialist use.
+- [x] No runtime component needs to trust arbitrary absolute paths from a message.
+- [x] Path traversal and symlink traversal are rejected before sandbox or specialist use.
 
 ### P0.3 — Improve sandbox execution policy
 
-Status: open.
+Status: completed.
 
 Problem: sandbox hardening exists, but the execution policy is still minimal.
 
 Tasks:
 
-- [ ] Add explicit Docker image configuration, for example `CTF_SANDBOX_IMAGE`.
-- [ ] Run containers with read-only root filesystem by default.
-- [ ] Add memory, CPU, process, and file-size limits.
-- [ ] Disable network by default and enforce network opt-in.
-- [ ] Mount only the challenge workspace.
-- [ ] Drop Linux capabilities.
-- [ ] Add seccomp/AppArmor profile support where available.
-- [ ] Add timeout kill and cleanup guarantees.
+- [x] Add explicit Docker image configuration, for example `CTF_SANDBOX_IMAGE`.
+- [x] Run containers with read-only root filesystem by default.
+- [x] Add memory, CPU, process, and file-size limits.
+- [x] Disable network by default and enforce network opt-in.
+- [x] Mount only the challenge workspace.
+- [x] Drop Linux capabilities.
+- [x] Add seccomp/AppArmor profile support where available.
+- [x] Add timeout kill and cleanup guarantees.
 
 Acceptance criteria:
 
-- [ ] Untrusted binaries never execute directly on the host.
-- [ ] A timed-out process is killed and the container is removed.
-- [ ] Network access is impossible unless explicitly requested.
+- [x] Untrusted binaries never execute directly on the host.
+- [x] A timed-out process is killed and the container is removed.
+- [x] Network access is impossible unless explicitly requested.
 
 ### P0.4 — Add flag redaction and secret-handling policy
 
-Status: open.
+Status: completed.
 
 Problem: traces, logs, and memory can contain flags. This is useful for CTF solving but bad for shared logs or screenshots.
 
 Tasks:
 
-- [ ] Add `redact_flag()` helper.
-- [ ] Redact candidate strings in logs by default.
-- [ ] Redact candidate strings in trace payloads unless explicitly allowed.
-- [ ] Keep full flag only in candidate records and final result path.
-- [ ] Document how to enable full debug output locally.
+- [x] Add `redact_flag()` helper.
+- [x] Redact candidate strings in logs by default.
+- [x] Redact candidate strings in trace payloads unless explicitly allowed.
+- [x] Keep full flag only in candidate records and final result path.
+- [x] Document how to enable full debug output locally.
 
 Acceptance criteria:
 
-- [ ] Normal logs do not expose `CTF{...}` values.
-- [ ] Smoke tests still verify the final flag value internally.
+- [x] Normal logs do not expose `CTF{...}` values.
+- [x] Smoke tests still verify the final flag value internally.
 
 ## P1 — Next quality improvements
 
@@ -198,8 +198,8 @@ Tasks:
 - [x] Add trace filtering to `show-trace` and `export-trace`.
   - [x] `--latest`
   - [x] `--run-id`
-- [ ] Add `summarize-trace`.
-- [ ] Add `validate-trace`.
+- [x] Add `summarize-trace`.
+- [x] Add `validate-trace`.
 - [ ] Add better exit codes:
   - [ ] `0` solved.
   - [ ] `1` not solved.
@@ -217,16 +217,16 @@ Status: open.
 
 Tasks:
 
-- [ ] Add or update `runtime/docker-compose.yml` for Kafka + Redis.
+- [x] Add or update `runtime/docker-compose.yml` for Kafka + Redis.
 - [ ] Add a `make distributed-up` or documented equivalent.
 - [ ] Add a distributed smoke test scenario.
-- [ ] Add topic list documentation.
+- [x] Add topic list documentation.
 - [ ] Add troubleshooting section for Kafka advertised listeners.
 
 Acceptance criteria:
 
 - [ ] User can start Kafka/Redis and run one submitted challenge end-to-end.
-- [ ] README includes exact commands and expected output.
+- [x] README includes exact commands and expected output.
 
 ### P1.4 — Add first real specialist tool loop
 
@@ -266,7 +266,7 @@ Tasks:
 - [ ] Implement local notes lookup backend.
 - [ ] Implement writeup corpus lookup backend.
 - [ ] Implement optional web-backed researcher adapter.
-- [ ] Keep researcher synchronous from the specialist perspective.
+- [x] Keep researcher synchronous from the specialist perspective.
 - [ ] Add `ResearchResult` examples in tests.
 - [ ] Add deepsearcher escalation brief contract.
 
@@ -358,7 +358,7 @@ Status: open.
 
 Tasks:
 
-- [ ] Implement orchestrator handoff consumption.
+- [x] Implement orchestrator handoff consumption.
 - [ ] Deduplicate repeated handoffs.
 - [ ] Preserve carry-over evidence and hypotheses.
 - [ ] Add max handoff depth.

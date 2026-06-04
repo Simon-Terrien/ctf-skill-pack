@@ -98,6 +98,7 @@ class Hypothesis(BaseModel):
 class Candidate(BaseModel):
     id: str = Field(default_factory=_id)
     challenge_id: str
+    workdir: str = ""
     candidate: str
     source: str
     flag_format: Optional[str] = None
@@ -118,6 +119,7 @@ class Candidate(BaseModel):
 class Challenge(BaseModel):
     id: str = Field(default_factory=_id)
     name: str
+    workdir: str = ""
     category_hint: Optional[Category] = None
     artifacts: list[str] = Field(default_factory=list)  # paths in the challenge dir
     flag_format: Optional[str] = None
@@ -129,6 +131,7 @@ class Task(BaseModel):
     """Orchestrator -> specialist. Fanned out on ctf.tasks, keyed by category."""
     id: str = Field(default_factory=_id)
     challenge_id: str
+    workdir: str = ""
     category: Category
     artifacts: list[str]
     flag_format: Optional[str] = None
@@ -159,6 +162,7 @@ class TraceEvent(BaseModel):
 class SandboxRequest(BaseModel):
     id: str = Field(default_factory=_id)
     challenge_id: str
+    workdir: str = ""
     artifact: str
     argv: list[str] = Field(default_factory=list)
     stdin: Optional[bytes] = None

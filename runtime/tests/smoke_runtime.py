@@ -17,6 +17,7 @@ from ctfrt.orchestrator import Orchestrator
 from ctfrt.sandbox import run_sandboxed
 from ctfrt.trace_recorder import iter_trace_events
 from ctfrt.tools import Researcher
+from ctfrt.workspace import register_artifacts
 
 
 def run(coro):
@@ -85,6 +86,24 @@ async def test_sandbox_rejects_artifact_path_traversal():
     assert b"unsafe" in res.stderr
 
 
+async def test_sandbox_rejects_workspace_symlink_escape(tmp_path: Path):
+    import ctfrt.config as config
+
+    old_root = config.settings.challenge_root
+    try:
+        config.settings.challenge_root = str(tmp_path)
+        outside = tmp_path / "outside.bin"
+        outside.write_text("secret")
+        workspace = tmp_path / "c"
+        workspace.mkdir()
+        (workspace / "link.bin").symlink_to(outside)
+        res = await run_sandboxed(SandboxRequest(challenge_id="c", workdir="c", artifact="link.bin"))
+        assert res.exit_code == -126
+        assert b"unsafe" in res.stderr
+    finally:
+        config.settings.challenge_root = old_root
+
+
 async def test_inmemory_bus_replays_late_subscriber():
     from ctfrt.contracts import TraceEvent
     bus = InMemoryBus()
@@ -112,23 +131,41 @@ async def test_inmemory_bus_fanout_by_group_and_balances_within_group():
 
 
 async def test_orchestrator_triage_classifies_elf_magic(tmp_path: Path):
+    import ctfrt.config as config
+
     artifact = tmp_path / "a.bin"
     artifact.write_bytes(b"\x7fELF" + b"x" * 20)
-    orch = Orchestrator(InMemoryBus(), InMemoryWorkingMemory())
-    triage = await orch.triage(Challenge(name="elf", artifacts=[str(artifact)]))
-    assert triage["type"] == "elf"
+    old_root = config.settings.challenge_root
+    try:
+        config.settings.challenge_root = str(tmp_path / "root")
+        workdir, artifacts = register_artifacts("elf", [str(artifact)])
+        orch = Orchestrator(InMemoryBus(), InMemoryWorkingMemory())
+        triage = await orch.triage(Challenge(id="elf", name="elf", workdir=workdir, artifacts=artifacts))
+        assert triage["type"] == "elf"
+    finally:
+        config.settings.challenge_root = old_root
 
 
 async def test_orchestrator_publishes_to_category_task_topic(tmp_path: Path):
+    import ctfrt.config as config
+
     artifact = tmp_path / "a.bin"
     artifact.write_bytes(b"\x7fELF" + b"x" * 20)
-    bus = InMemoryBus(); mem = InMemoryWorkingMemory(); orch = Orchestrator(bus, mem)
-    sub_reverse = bus.subscribe("ctf.tasks.reverse", group="test")
-    read_task = asyncio.create_task(sub_reverse.__anext__())
-    await asyncio.sleep(0)
-    await orch.on_challenge(Challenge(name="elf", artifacts=[str(artifact)]))
-    raw = await asyncio.wait_for(read_task, 1)
-    assert raw["category"] == "reverse"
+    old_root = config.settings.challenge_root
+    try:
+        config.settings.challenge_root = str(tmp_path / "root")
+        workdir, artifacts = register_artifacts("elf", [str(artifact)])
+        bus = InMemoryBus(); mem = InMemoryWorkingMemory(); orch = Orchestrator(bus, mem)
+        sub_reverse = bus.subscribe("ctf.tasks.reverse", group="test")
+        read_task = asyncio.create_task(sub_reverse.__anext__())
+        await asyncio.sleep(0)
+        await orch.on_challenge(Challenge(id="elf", name="elf", workdir=workdir, artifacts=artifacts))
+        raw = await asyncio.wait_for(read_task, 1)
+        assert raw["category"] == "reverse"
+        assert raw["workdir"] == workdir
+        assert raw["artifacts"] == artifacts
+    finally:
+        config.settings.challenge_root = old_root
 
 
 async def test_specialist_static_flag_scan_emits_candidate(tmp_path: Path):
@@ -295,6 +332,62 @@ async def test_trace_recorder_persists_solved_trace(tmp_path: Path):
     row = json.loads(rows[0])
     assert row["challenge_id"] == "rev-001"
     assert row["payload"]["technique"] == ["ltrace", "strcmp"]
+
+
+async def test_trace_recorder_redacts_flag_payload_by_default(tmp_path: Path):
+    from ctfrt.contracts import TraceEvent
+    from ctfrt.trace_recorder import TraceRecorder
+
+    old_debug = os.environ.pop("CTF_DEBUG_FLAGS", None)
+    bus = InMemoryBus()
+    recorder = TraceRecorder(bus, tmp_path)
+    task = asyncio.create_task(recorder.run())
+    await asyncio.sleep(0)
+    try:
+        await bus.publish("ctf.traces", TraceEvent(
+            challenge_id="rev-002",
+            kind="solved",
+            payload={"flag": "CTF{secret_value}", "source": "reverse:Stub"},
+        ))
+        trace_file = tmp_path / "rev-002.jsonl"
+        for _ in range(50):
+            if trace_file.exists():
+                break
+            await asyncio.sleep(0.01)
+        rows = trace_file.read_text(encoding="utf-8").splitlines()
+        row = json.loads(rows[0])
+        assert row["payload"]["flag"] == "[REDACTED_FLAG]"
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        if old_debug is not None:
+            os.environ["CTF_DEBUG_FLAGS"] = old_debug
+
+
+def test_sandbox_docker_argv_hardening():
+    import ctfrt.sandbox as sandbox_mod
+
+    req = SandboxRequest(challenge_id="c", workdir="c", artifact="bin", argv=["--flag"])
+    old_ro = sandbox_mod.READ_ONLY_ROOT
+    old_sec = sandbox_mod.SEC_COMP
+    old_app = sandbox_mod.APPARMOR
+    try:
+        sandbox_mod.READ_ONLY_ROOT = True
+        sandbox_mod.SEC_COMP = "/tmp/seccomp.json"
+        sandbox_mod.APPARMOR = "ctf-default"
+        argv = sandbox_mod._docker_argv(req, Path("/tmp/work"))
+        assert "--read-only" in argv
+        assert "--tmpfs" in argv
+        assert "--ulimit" in argv
+        assert "fsize=10485760" in argv
+        assert "none" in argv  # network default off
+        assert "seccomp=/tmp/seccomp.json" in argv
+        assert "apparmor=ctf-default" in argv
+    finally:
+        sandbox_mod.READ_ONLY_ROOT = old_ro
+        sandbox_mod.SEC_COMP = old_sec
+        sandbox_mod.APPARMOR = old_app
 
 
 def test_trace_cli_show_and_export(tmp_path: Path):
@@ -751,7 +844,10 @@ async def test_runtime_optional_memory_component_starts_when_cms_available(tmp_p
 
 def _run_solve_local_subprocess(*, name: str, artifact: Path, flag_format: str,
                                 timeout: float, trace_dir: Path | None = None,
-                                engine: str | None = None):
+                                engine: str | None = None,
+                                challenge_root: Path | None = None,
+                                log_level: str | None = None,
+                                debug_flags: str | None = None):
     env = os.environ.copy()
     env["PYTHONPATH"] = "runtime"
     if engine is None:
@@ -762,6 +858,18 @@ def _run_solve_local_subprocess(*, name: str, artifact: Path, flag_format: str,
         env["CTF_TRACE_DIR"] = str(trace_dir)
     else:
         env.pop("CTF_TRACE_DIR", None)
+    if challenge_root is not None:
+        env["CTF_CHALLENGE_ROOT"] = str(challenge_root)
+    else:
+        env.pop("CTF_CHALLENGE_ROOT", None)
+    if log_level is not None:
+        env["CTF_LOG_LEVEL"] = log_level
+    else:
+        env.pop("CTF_LOG_LEVEL", None)
+    if debug_flags is not None:
+        env["CTF_DEBUG_FLAGS"] = debug_flags
+    else:
+        env.pop("CTF_DEBUG_FLAGS", None)
     return subprocess.run([
         sys.executable, "-m", "ctfrt.cli", "solve-local",
         "--name", name,
@@ -802,6 +910,42 @@ def test_cli_solve_local_persists_trace(tmp_path: Path):
     kinds = [ev.kind for ev in iter_trace_events(trace_dir, "cli-static-exit")]
     for kind in ("routed", "task_started", "candidate_emitted", "candidate_accepted", "solved"):
         assert kind in kinds
+
+
+def test_cli_solve_local_registers_artifact_under_workspace(tmp_path: Path):
+    artifact = tmp_path / "note.txt"
+    artifact.write_text("noise CTF{cli_static_win} end")
+    challenge_root = tmp_path / "challenge-root"
+    result = _run_solve_local_subprocess(
+        name="cli-workspace",
+        artifact=artifact,
+        flag_format=r"CTF\{[^}]+\}",
+        timeout=5,
+        challenge_root=challenge_root,
+    )
+    assert result.returncode == 0
+    workspace_file = challenge_root / "cli-workspace" / "note.txt"
+    assert workspace_file.exists()
+    assert workspace_file.read_text() == artifact.read_text()
+
+
+def test_cli_solve_local_logs_event_trail_and_redacts_flag(tmp_path: Path):
+    artifact = tmp_path / "note.txt"
+    artifact.write_text("noise CTF{cli_static_win} end")
+    result = _run_solve_local_subprocess(
+        name="cli-logs",
+        artifact=artifact,
+        flag_format=r"CTF\{[^}]+\}",
+        timeout=5,
+        log_level="INFO",
+    )
+    assert result.returncode == 0
+    assert "CTF{cli_static_win}" in result.stdout
+    assert "solve-local prepared" in result.stderr
+    assert "challenge routed" in result.stderr
+    assert "candidate verdict" in result.stderr
+    assert "solve-local solved" in result.stderr
+    assert "CTF{cli_static_win}" not in result.stderr
 
 
 def test_cli_solve_local_unsolved_exits_without_hanging(tmp_path: Path):
@@ -850,6 +994,8 @@ TESTS = [
     test_gate_accepts_valid_local_candidate,
     test_sandbox_binary_json_roundtrip,
     test_sandbox_rejects_artifact_path_traversal,
+    test_sandbox_rejects_workspace_symlink_escape,
+    test_sandbox_docker_argv_hardening,
     test_inmemory_bus_replays_late_subscriber,
     test_inmemory_bus_fanout_by_group_and_balances_within_group,
     test_orchestrator_triage_classifies_elf_magic,
@@ -860,6 +1006,7 @@ TESTS = [
     test_gate_emits_acceptance_trace,
     test_sandbox_worker_traces_request_and_result,
     test_trace_recorder_persists_solved_trace,
+    test_trace_recorder_redacts_flag_payload_by_default,
     test_trace_cli_show_and_export,
     test_trace_cli_show_and_export_support_run_filters,
     test_trace_cli_validate_trace_valid_solved_returns_0,
@@ -871,6 +1018,8 @@ TESTS = [
     test_runtime_optional_memory_component_starts_when_cms_available,
     test_cli_solve_local_subprocess_exits_cleanly,
     test_cli_solve_local_persists_trace,
+    test_cli_solve_local_registers_artifact_under_workspace,
+    test_cli_solve_local_logs_event_trail_and_redacts_flag,
     test_cli_solve_local_unsolved_exits_without_hanging,
     test_cli_solve_local_biobrain_solves_xor_artifact_first,
 ]

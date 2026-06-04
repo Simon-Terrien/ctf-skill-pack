@@ -112,7 +112,12 @@ class InMemoryBus(Bus):
                 await q.put(item)
         try:
             while True:
-                yield await q.get()
+                try:
+                    yield await q.get()
+                except asyncio.CancelledError:
+                    # Let task cancellation break the subscription loop cleanly so
+                    # asyncio.run() does not hang while shutting down async generators.
+                    return
         finally:
             self._groups[topic][group].remove(q)
 

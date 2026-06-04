@@ -89,6 +89,8 @@ class Gate:
                 kind="candidate_rejected",
                 payload={"candidate_id": c.id, "reasons": rejects},
             ))
+            log.debug("publish topic", extra=kv(
+                topic=Topics.TRACES, challenge_id=c.challenge_id, kind="candidate_rejected"))
             await self.bus.publish(Topics.TRACES, TraceEvent(
                 challenge_id=c.challenge_id,
                 kind="gate_verdict",
@@ -105,6 +107,8 @@ class Gate:
                     "reasons": rejects,
                 },
             ))
+            log.debug("publish topic", extra=kv(
+                topic=Topics.TRACES, challenge_id=c.challenge_id, kind="gate_verdict"))
             await self.mem.record_candidate(c)
             return c
 
@@ -137,10 +141,16 @@ class Gate:
                 "evidence_count": len(c.evidence),
             },
         ))
+        log.debug("publish topic", extra=kv(
+            topic=Topics.TRACES, challenge_id=c.challenge_id,
+            kind="candidate_accepted" if c.status in ("solved", "locally_verified") else "gate_verdict"))
         await self.mem.record_candidate(c)
         return c
 
     async def run(self) -> None:
+        log.info("gate started", extra=kv(group="gate"))
+        log.debug("subscribe topic", extra=kv(topic=Topics.CANDIDATES, group="gate"))
         async for raw in self.bus.subscribe(Topics.CANDIDATES, group="gate"):
             c = await self.evaluate(Candidate.model_validate(raw))
+            log.debug("publish topic", extra=kv(topic=Topics.FLAGS, challenge_id=c.challenge_id))
             await self.bus.publish(Topics.FLAGS, c, key=c.challenge_id)

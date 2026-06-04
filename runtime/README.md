@@ -89,3 +89,34 @@ cd runtime
 PYTHONPATH=. python -m compileall -q ctfrt tests
 PYTHONPATH=. python tests/smoke_runtime.py
 ```
+
+## Logging and redaction
+
+Runtime logs are controlled with:
+
+```text
+CTF_LOG_LEVEL=INFO|DEBUG|...
+CTF_LOG_JSON=1          # JSON log lines
+```
+
+Flags are redacted in logs and persisted traces by default. To disable redaction
+for local debugging only:
+
+```bash
+CTF_DEBUG_FLAGS=1 PYTHONPATH=. python -m ctfrt.cli solve-local ...
+```
+
+## Sandbox policy
+
+Sandbox execution is Docker-based and supports these knobs:
+
+```text
+CTF_SANDBOX_IMAGE
+CTF_SANDBOX_READ_ONLY_ROOT
+CTF_SANDBOX_CPUS
+CTF_SANDBOX_MEMORY
+CTF_SANDBOX_PIDS_LIMIT
+CTF_SANDBOX_FILE_SIZE
+CTF_SANDBOX_SECCOMP
+CTF_SANDBOX_APPARMOR
+```

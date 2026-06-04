@@ -14,6 +14,7 @@ from .config import Topics
 from .contracts import Candidate, Category, Challenge, TraceEvent
 from .gate import Gate
 from .engines import engine_for_category
+from .log import get_logger, kv, sanitize
 from .memory import InMemoryWorkingMemory, make_working_memory
 from .orchestrator import Orchestrator
 from .trace_recorder import (
@@ -26,6 +27,9 @@ from .trace_recorder import (
     validate_trace_events,
 )
 from .tools import Researcher
+from .workspace import register_artifacts
+
+log = get_logger(__name__)
 
 
 def _category(value: str | None) -> Category | None:
@@ -40,20 +44,31 @@ async def submit(args) -> None:
             "Refusing to submit to the default in-memory bus from a separate process. "
             "Set CTF_KAFKA for distributed runtime, or use solve-local."
         )
+    challenge_id = uuid.uuid4().hex[:12]
+    try:
+        workdir, artifacts = register_artifacts(challenge_id, args.artifact or [])
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    log.info("submit challenge prepared", extra=kv(
+        challenge_id=challenge_id, workdir=workdir, artifact_count=len(artifacts)))
     bus = make_bus()
     await bus.start()
     try:
         ch = Challenge(
+            id=challenge_id,
             name=args.name,
+            workdir=workdir,
             category_hint=_category(args.category),
-            artifacts=args.artifact or [],
+            artifacts=artifacts,
             flag_format=args.flag_format,
             remote=args.remote,
             description=args.description or "",
         )
+        log.debug("publish topic", extra=kv(topic=Topics.CHALLENGES, challenge_id=ch.id))
         await bus.publish(Topics.CHALLENGES, ch, key=ch.id)
         print(ch.id)
     finally:
+        log.info("submit challenge finished", extra=kv(challenge_id=challenge_id))
         await bus.stop()
 
 
@@ -62,16 +77,23 @@ async def solve_local(args) -> None:
     mem = InMemoryWorkingMemory()
     researcher = Researcher()
     run_id = uuid.uuid4().hex[:12]
+    try:
+        workdir, artifacts = register_artifacts(args.name, args.artifact or [])
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    log.info("solve-local prepared", extra=kv(
+        challenge_id=args.name, workdir=workdir, artifact_count=len(artifacts), timeout=args.timeout))
     trace_dir = Path(os.getenv("CTF_TRACE_DIR", ".ctfrt/traces"))
     trace_dir.mkdir(parents=True, exist_ok=True)
     await bus.start()
 
     async def local_trace_recorder() -> None:
+        log.debug("subscribe topic", extra=kv(topic=Topics.TRACES, group="cli-trace-recorder"))
         async for raw in bus.subscribe(Topics.TRACES, group="cli-trace-recorder"):
             ev = TraceEvent.model_validate(raw)
             payload = dict(ev.payload or {})
             payload.setdefault("run_id", run_id)
-            ev = ev.model_copy(update={"payload": payload})
+            ev = ev.model_copy(update={"payload": sanitize(payload)})
             path = trace_path_for(trace_dir, ev.challenge_id)
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as fh:
@@ -92,17 +114,21 @@ async def solve_local(args) -> None:
     ch = Challenge(
         id=args.name,
         name=args.name,
+        workdir=workdir,
         category_hint=cat,
-        artifacts=args.artifact or [],
+        artifacts=artifacts,
         flag_format=args.flag_format,
         remote=args.remote,
         description=args.description or "",
     )
     flag_sub = bus.subscribe(Topics.FLAGS, group="cli-solve-local")
     trace_sub = bus.subscribe(Topics.TRACES, group="cli-solve-local-traces")
+    log.debug("subscribe topic", extra=kv(topic=Topics.FLAGS, group="cli-solve-local"))
+    log.debug("subscribe topic", extra=kv(topic=Topics.TRACES, group="cli-solve-local-traces"))
     flag_task = asyncio.create_task(flag_sub.__anext__())
     trace_task = asyncio.create_task(trace_sub.__anext__())
     await asyncio.sleep(0.05)
+    log.debug("publish topic", extra=kv(topic=Topics.CHALLENGES, challenge_id=ch.id))
     await bus.publish(Topics.CHALLENGES, ch, key=ch.id)
     try:
         async with asyncio.timeout(args.timeout):
@@ -126,8 +152,12 @@ async def solve_local(args) -> None:
                                 ):
                                     break
                                 await asyncio.sleep(0.02)
+                            log.info("solve-local solved", extra=kv(
+                                challenge_id=ch.id, status=c.status, candidate=c.candidate))
                             print(c.candidate)
                         else:
+                            log.info("solve-local finished without solved verdict", extra=kv(
+                                challenge_id=ch.id, status=c.status, candidate=c.candidate))
                             print(f"not solved: {c.status} {c.candidate}")
                         return
                     flag_task = asyncio.create_task(flag_sub.__anext__())
@@ -136,10 +166,13 @@ async def solve_local(args) -> None:
                     ev = TraceEvent.model_validate(trace_task.result())
                     if ev.challenge_id == ch.id and ev.kind in {"engine_error", "engine_no_candidate"}:
                         detail = ev.payload.get("error") or ev.payload.get("reasoning") or ev.payload.get("reason", "")
+                        log.info("solve-local terminal trace", extra=kv(
+                            challenge_id=ch.id, kind=ev.kind, detail=str(detail)))
                         print(f"not solved: {ev.kind} {detail}".rstrip())
                         return
                     trace_task = asyncio.create_task(trace_sub.__anext__())
     except TimeoutError:
+        log.info("solve-local timeout", extra=kv(challenge_id=ch.id, timeout=args.timeout))
         print(f"not solved: timeout after {args.timeout:g}s")
         raise SystemExit(1)
     finally:
@@ -152,6 +185,7 @@ async def solve_local(args) -> None:
         await trace_sub.aclose()
         await mem.close()
         await bus.stop()
+        log.info("solve-local shutdown complete", extra=kv(challenge_id=args.name))
 
 
 def _trace_dir(args) -> Path:

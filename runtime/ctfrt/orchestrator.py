@@ -14,6 +14,7 @@ from .config import Topics
 from .contracts import Candidate, Category, Challenge, Handoff, Hypothesis, Task, TraceEvent
 from .log import get_logger, kv
 from .memory import LongTermMemory, MemoryProtocol, NullLongTermMemory
+from .workspace import normalize_relative_path, normalize_workdir, resolve_artifact_path
 
 
 def route(triage: dict, hint: Category | None) -> Category:
@@ -31,8 +32,11 @@ def route(triage: dict, hint: Category | None) -> Category:
     return hint or Category.misc
 
 
-def _classify_artifact(path: str) -> str:
-    p = Path(path)
+def _classify_artifact(challenge_id: str, workdir: str, artifact: str) -> str:
+    try:
+        p = resolve_artifact_path(artifact, challenge_id=challenge_id, workdir=workdir)
+    except ValueError:
+        return "unknown"
     suffix = p.suffix.lower()
     try:
         head = p.read_bytes()[:16]
@@ -77,9 +81,17 @@ class Orchestrator:
         self.mem = mem
         self.ltm = ltm or NullLongTermMemory()
 
+    def _validated_workspace(self, ch: Challenge) -> tuple[str, list[str]]:
+        workdir = normalize_workdir(ch.workdir, ch.id)
+        artifacts = [normalize_relative_path(artifact) for artifact in ch.artifacts]
+        for artifact in artifacts:
+            resolve_artifact_path(artifact, challenge_id=ch.id, workdir=workdir)
+        return workdir, artifacts
+
     async def triage(self, ch: Challenge) -> dict:
+        workdir, artifacts = self._validated_workspace(ch)
         lessons = await self.ltm.retrieve(signals=[ch.name, ch.description])
-        artifact_types = [_classify_artifact(a) for a in ch.artifacts]
+        artifact_types = [_classify_artifact(ch.id, workdir, artifact) for artifact in artifacts]
         desc = (ch.description or "").lower()
         remote = (ch.remote or "").lower()
 
@@ -101,17 +113,35 @@ class Orchestrator:
         return {"type": primary, "artifact_types": artifact_types, "lessons": lessons}
 
     async def on_challenge(self, ch: Challenge) -> None:
+        try:
+            workdir, artifacts = self._validated_workspace(ch)
+        except ValueError as exc:
+            log.warning("challenge rejected", extra=kv(
+                challenge_id=ch.id, error=repr(exc)))
+            await self.bus.publish(Topics.TRACES, TraceEvent(
+                challenge_id=ch.id,
+                kind="challenge_rejected",
+                payload={"reason": str(exc)},
+            ))
+            log.debug("publish topic", extra=kv(
+                topic=Topics.TRACES, challenge_id=ch.id, kind="challenge_rejected"))
+            return
+        ch = ch.model_copy(update={"workdir": workdir, "artifacts": artifacts})
         triage = await self.triage(ch)
         cat = route(triage, ch.category_hint)
         board = {"name": ch.name, "status": "in_progress", "primary": cat.value,
-                 "artifacts": ch.artifacts, "flags": [], "rejected_paths": []}
+                 "workdir": workdir, "artifacts": ch.artifacts, "flags": [], "rejected_paths": []}
         await self.mem.set_board(ch.id, board)
         await self.bus.publish(Topics.tasks_for(cat), Task(
-            challenge_id=ch.id, category=cat, artifacts=ch.artifacts,
+            challenge_id=ch.id, workdir=workdir, category=cat, artifacts=ch.artifacts,
             flag_format=ch.flag_format, triage=triage), key=cat.value)
+        log.debug("publish topic", extra=kv(
+            topic=Topics.tasks_for(cat), challenge_id=ch.id, category=cat.value))
         log.info("challenge routed", extra=kv(challenge_id=ch.id, category=cat.value))
         await self.bus.publish(Topics.TRACES, TraceEvent(
             challenge_id=ch.id, kind="routed", payload={"category": cat.value, "triage": triage}))
+        log.debug("publish topic", extra=kv(
+            topic=Topics.TRACES, challenge_id=ch.id, kind="routed"))
 
     async def on_handoff(self, h: Handoff) -> None:
         board = await self.mem.get_board(h.challenge_id)
@@ -119,9 +149,13 @@ class Orchestrator:
         if await self.mem.is_rejected(h.challenge_id, sig):
             return
         await self.bus.publish(Topics.tasks_for(h.target), Task(
-            challenge_id=h.challenge_id, category=h.target,
+            challenge_id=h.challenge_id, workdir=board.get("workdir", ""), category=h.target,
             artifacts=board.get("artifacts", []), triage={"carry": h.carry}),
             key=h.target.value)
+        log.info("handoff routed", extra=kv(
+            challenge_id=h.challenge_id, source=h.from_category.value, target=h.target.value))
+        log.debug("publish topic", extra=kv(
+            topic=Topics.tasks_for(h.target), challenge_id=h.challenge_id, category=h.target.value))
 
     async def on_flag(self, c: Candidate) -> None:
         board = await self.mem.get_board(c.challenge_id)
@@ -129,16 +163,19 @@ class Orchestrator:
             board["status"] = "solved"
             board.setdefault("flags", []).append(c.candidate)
             await self.mem.set_board(c.challenge_id, board)
-            log.info("challenge SOLVED", extra=kv(challenge_id=c.challenge_id, flag=c.candidate))
+            log.info("challenge SOLVED", extra=kv(challenge_id=c.challenge_id, status=c.status))
             await self.bus.publish(Topics.TRACES, TraceEvent(
                 challenge_id=c.challenge_id, kind="solved",
-                payload={"flag": c.candidate, "category": board.get("primary", ""),
+                payload={"category": board.get("primary", ""),
                          "technique": c.technique, "source": c.source}))
+            log.debug("publish topic", extra=kv(
+                topic=Topics.TRACES, challenge_id=c.challenge_id, kind="solved"))
 
     async def on_hypothesis(self, h: Hypothesis) -> None:
         await self.mem.upsert_hypothesis(h)
 
     async def run(self) -> None:
+        log.info("orchestrator started", extra=kv())
         await asyncio.gather(
             self._loop(Topics.CHALLENGES, Challenge, self.on_challenge, "orch-ch"),
             self._loop(Topics.HANDOFFS, Handoff, self.on_handoff, "orch-ho"),
@@ -147,5 +184,6 @@ class Orchestrator:
         )
 
     async def _loop(self, topic, model, handler, group):
+        log.debug("subscribe topic", extra=kv(topic=topic, group=group))
         async for raw in self.bus.subscribe(topic, group=group):
             await handler(model.model_validate(raw))

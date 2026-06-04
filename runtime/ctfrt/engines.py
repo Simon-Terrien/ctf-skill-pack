@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Optional, Protocol, runtime_checkable
 
 from .contracts import Category, Task
+from .workspace import resolve_artifact_path
 
 # technique vocabulary shared with cms_cag for consistent tagging/surfacing
 _TECHNIQUE_VOCAB = [
@@ -41,7 +42,12 @@ def _solve_xor_artifact(task: Task) -> EngineResult | None:
 
     for art in task.artifacts:
         try:
-            spec = json.loads(Path(art).read_text())
+            path = resolve_artifact_path(
+                art,
+                challenge_id=task.challenge_id,
+                workdir=task.workdir or None,
+            )
+            spec = json.loads(path.read_text())
         except (OSError, ValueError):
             continue
         if spec.get("type") not in (None, "xor-crackme"):

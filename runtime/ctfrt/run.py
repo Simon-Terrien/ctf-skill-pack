@@ -27,10 +27,16 @@ from .contracts import SandboxRequest
 from .tools import Researcher, DeepSearcher
 from .trace_recorder import TraceRecorder
 
+log = get_logger(__name__)
+
 
 async def sandbox_worker(bus: Bus) -> None:
+    log.info("sandbox worker started", extra=kv(group="sandbox"))
+    log.debug("subscribe topic", extra=kv(topic=Topics.SANDBOX_REQ, group="sandbox"))
     async for raw in bus.subscribe(Topics.SANDBOX_REQ, group="sandbox"):
         req = SandboxRequest.model_validate(raw)
+        log.debug("publish topic", extra=kv(
+            topic=Topics.TRACES, challenge_id=req.challenge_id, kind="sandbox_request"))
         await bus.publish(Topics.TRACES, TraceEvent(
             challenge_id=req.challenge_id,
             kind="sandbox_request",
@@ -70,6 +76,10 @@ async def sandbox_worker(bus: Bus) -> None:
             kind=kind,
             payload=payload,
         ))
+        log.debug("publish topic", extra=kv(
+            topic=Topics.TRACES, challenge_id=req.challenge_id, kind=kind))
+        log.debug("publish topic", extra=kv(
+            topic=Topics.SANDBOX_RES, challenge_id=req.challenge_id, request_id=req.id))
         await bus.publish(Topics.SANDBOX_RES, res, key=req.challenge_id)
 
 
@@ -95,7 +105,6 @@ def _optional_components(component: str, bus: Bus):
 
 async def main(component: str = "all") -> None:
     setup_logging()
-    log = get_logger("run")
     log.info("booting runtime component", extra={"ctf": {"component": component}})
     bus = make_bus()
     await bus.start()
@@ -119,6 +128,7 @@ async def main(component: str = "all") -> None:
     try:
         await asyncio.gather(*tasks)
     finally:
+        log.info("runtime shutdown", extra=kv(component=component))
         await bus.stop()
         await mem.close()
 
