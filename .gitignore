@@ -35,3 +35,12 @@ runtime/*.db
 tmp/
 /tmp/
 
+# Imported archives and platform sidecars
+*.zip
+*.tar
+*.tgz
+*.tar.gz
+*.7z
+*.Zone.Identifier
+cms_runtime (1).tar.gz:Zone.Identifier
+*:Zone.Identifier

@@ -109,7 +109,14 @@ class SpecialistAgent:
             pass
 
         await self._trace(task.challenge_id, "engine_dispatch", {"engine": type(self.engine).__name__})
-        result = await self.engine.solve(task)
+        try:
+            result = await self.engine.solve(task)
+        except Exception as exc:
+            await self._trace(task.challenge_id, "engine_error", {
+                "engine": type(self.engine).__name__,
+                "error": repr(exc),
+            })
+            return
 
         if result.handoff is not None:
             await self.bus.publish(Topics.HANDOFFS, Handoff(

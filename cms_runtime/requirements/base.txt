@@ -1,0 +1,3 @@
+# Base requirements for the CMS runtime core.
+# Minimal dependencies — no ML libraries required for the L1 slice.
+numpy>=1.24

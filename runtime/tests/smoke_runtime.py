@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import asyncio
 import contextlib
 import json
@@ -383,6 +384,75 @@ def test_cli_solve_local_static_flag(tmp_path: Path):
     assert out == "CTF{cli_static_win}"
 
 
+async def test_cli_solve_local_uses_configured_engine(tmp_path: Path):
+    from argparse import Namespace
+
+    import ctfrt.engines as runtime_engines
+    from ctfrt import cli as runtime_cli
+    from ctfrt.contracts import Category
+    from ctfrt.engines import EngineResult
+
+    artifact = tmp_path / "xor_crackme.json"
+    artifact.write_text(json.dumps({
+        "xor_key": 90,
+        "blob_hex": bytes(ord(c) ^ 90 for c in "CTF{xor_reversed}").hex(),
+    }))
+
+    class FakeBioBrainAdapter:
+        def __init__(self, category, *args, **kwargs):
+            self.category = category
+
+        async def solve(self, task):
+            return EngineResult(
+                candidate="CTF{xor_reversed}",
+                evidence=[f"artifact={task.artifacts[0]}", "stub engine"],
+                reproduced=True,
+                reproduction={"method": "reencode_xor", "artifact": task.artifacts[0]},
+                technique=["xor"],
+                reasoning=["stub engine"],
+            )
+
+    old_adapter = runtime_engines.BioBrainAdapter
+    old_engine = os.environ.get("CTF_AGENT_ENGINE")
+    old_trace_dir = os.environ.get("CTF_TRACE_DIR")
+    trace_dir = tmp_path / "traces"
+    try:
+        runtime_engines.BioBrainAdapter = FakeBioBrainAdapter
+        os.environ["CTF_AGENT_ENGINE"] = "biobrain"
+        os.environ["CTF_TRACE_DIR"] = str(trace_dir)
+
+        args = Namespace(
+            name="xor",
+            category=Category.reverse.value,
+            artifact=[str(artifact)],
+            flag_format=r"CTF\{[^}]+\}",
+            remote=None,
+            description="",
+            timeout=2.0,
+        )
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            await runtime_cli.solve_local(args)
+
+        assert buf.getvalue().strip() == "CTF{xor_reversed}"
+        events = iter_trace_events(trace_dir, "xor")
+        kinds = [ev.kind for ev in events]
+        assert "engine_dispatch" in kinds
+        assert "needs_engine" not in kinds
+        assert "candidate_emitted" in kinds
+        assert "gate_verdict" in kinds or "candidate_accepted" in kinds
+    finally:
+        runtime_engines.BioBrainAdapter = old_adapter
+        if old_engine is None:
+            os.environ.pop("CTF_AGENT_ENGINE", None)
+        else:
+            os.environ["CTF_AGENT_ENGINE"] = old_engine
+        if old_trace_dir is None:
+            os.environ.pop("CTF_TRACE_DIR", None)
+        else:
+            os.environ["CTF_TRACE_DIR"] = old_trace_dir
+
+
 TESTS = [
     test_gate_rejects_invalid_local_only_candidate,
     test_gate_rejects_oracle_failed_even_if_local_passed,
@@ -404,6 +474,7 @@ TESTS = [
     test_runtime_optional_components_do_not_require_cms_by_default,
     test_runtime_optional_memory_component_starts_when_cms_available,
     test_cli_solve_local_static_flag,
+    test_cli_solve_local_uses_configured_engine,
 ]
 
 

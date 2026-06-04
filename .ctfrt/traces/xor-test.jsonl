@@ -1,0 +1,16 @@
+{"id":"b99431fa2d29","challenge_id":"xor-test","category":null,"kind":"routed","payload":{"category":"reverse","triage":{"type":"reverse","artifact_types":["unknown"],"lessons":[]}},"ts":1780501358.493158}
+{"id":"07599bf976b9","challenge_id":"xor-test","category":"reverse","kind":"task_started","payload":{"category":"reverse"},"ts":1780501358.4932163}
+{"id":"dfa710c6e621","challenge_id":"xor-test","category":"reverse","kind":"needs_engine","payload":{"reason":"no static flag and no SolveEngine attached"},"ts":1780501358.4933305}
+{"id":"9da4408ee115","challenge_id":"xor-test","category":null,"kind":"routed","payload":{"category":"reverse","triage":{"type":"reverse","artifact_types":["unknown"],"lessons":[]}},"ts":1780501406.6757996}
+{"id":"9635ea6d7a8c","challenge_id":"xor-test","category":"reverse","kind":"task_started","payload":{"category":"reverse"},"ts":1780501406.6758544}
+{"id":"f5a86cbbd26f","challenge_id":"xor-test","category":"reverse","kind":"needs_engine","payload":{"reason":"no static flag and no SolveEngine attached"},"ts":1780501406.675992}
+{"id":"fcba55c3d165","challenge_id":"xor-test","category":null,"kind":"routed","payload":{"category":"reverse","triage":{"type":"reverse","artifact_types":["unknown"],"lessons":[]}},"ts":1780501449.7649183}
+{"id":"ac3ecef35681","challenge_id":"xor-test","category":"reverse","kind":"task_started","payload":{"category":"reverse"},"ts":1780501449.764969}
+{"id":"67e7cd59c673","challenge_id":"xor-test","category":"reverse","kind":"needs_engine","payload":{"reason":"no static flag and no SolveEngine attached"},"ts":1780501449.7650793}
+{"id":"1ee599d0dd80","challenge_id":"xor-test","category":null,"kind":"routed","payload":{"category":"reverse","triage":{"type":"reverse","artifact_types":["unknown"],"lessons":[]}},"ts":1780501484.83987}
+{"id":"bfab5c525782","challenge_id":"xor-test","category":"reverse","kind":"task_started","payload":{"category":"reverse"},"ts":1780501484.8399312}
+{"id":"bd3ba661fab4","challenge_id":"xor-test","category":"reverse","kind":"needs_engine","payload":{"reason":"no static flag and no SolveEngine attached"},"ts":1780501484.8400614}
+{"id":"4da98fa8ea26","challenge_id":"xor-test","category":null,"kind":"routed","payload":{"category":"reverse","triage":{"type":"reverse","artifact_types":["unknown"],"lessons":[]}},"ts":1780501544.5719588}
+{"id":"2a2252fccdb5","challenge_id":"xor-test","category":"reverse","kind":"task_started","payload":{"category":"reverse"},"ts":1780501544.5720186}
+{"id":"6e802abf3ea4","challenge_id":"xor-test","category":"reverse","kind":"needs_engine","payload":{"reason":"no static flag and no SolveEngine attached"},"ts":1780501544.572138}
+{"id":"760071fdf0e6","challenge_id":"xor-test","category":null,"kind":"routed","payload":{"category":"reverse","triage":{"type":"reverse","artifact_types":["unknown"],"lessons":[]}},"ts":1780557675.3396094}

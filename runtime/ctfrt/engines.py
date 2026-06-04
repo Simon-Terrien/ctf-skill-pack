@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import os
 from dataclasses import dataclass, field
 from typing import Optional, Protocol, runtime_checkable
 
@@ -142,6 +143,14 @@ class BioBrainAdapter:
                 pass
         m = re.search(r"[A-Za-z0-9_]+\{[^}\r\n]{1,200}\}", text)
         return m.group(0) if m else None
+
+
+def engine_for_category(category: Category) -> SolveEngine | None:
+    """Build the configured engine for one category, if any."""
+    engine_mode = os.getenv("CTF_AGENT_ENGINE", "").strip().lower()
+    if engine_mode == "biobrain" and category in (Category.reverse, Category.misc):
+        return BioBrainAdapter(category)
+    return None
 
 
 # ── Deterministic stub engine (tests / offline dev) ───────────────────────────

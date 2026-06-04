@@ -1,0 +1,87 @@
+# BioBrain Procedural Memory — Playbook
+# Loaded into procedural memory at startup
+
+name: "owasp_auth_testing"
+description: "OWASP WSTG Authentication Testing Checklist"
+
+triggers:
+  - authentication
+  - auth_bypass
+  - login
+  - session
+  - credential
+  - oauth
+  - jwt
+
+steps:
+  - id: "WSTG-ATHN-01"
+    name: "Test for Credentials Transported over Encrypted Channel"
+    checks:
+      - "Verify TLS on login endpoints"
+      - "Check for mixed content"
+      - "Verify HSTS headers"
+
+  - id: "WSTG-ATHN-02"
+    name: "Test for Default Credentials"
+    checks:
+      - "Check common default credential pairs"
+      - "Verify admin/admin, admin/password variants"
+      - "Check vendor-specific defaults"
+
+  - id: "WSTG-ATHN-03"
+    name: "Test for Weak Lock Out Mechanism"
+    checks:
+      - "Test account lockout after N failures"
+      - "Check lockout duration"
+      - "Verify lockout applies to API endpoints"
+
+  - id: "WSTG-ATHN-04"
+    name: "Test for Bypassing Authentication Schema"
+    checks:
+      - "Direct page request (forced browsing)"
+      - "Parameter modification"
+      - "Session ID prediction"
+      - "SQL injection on auth endpoints"
+
+  - id: "WSTG-ATHN-05"
+    name: "Test for Vulnerable Remember Password"
+    checks:
+      - "Inspect remember-me token"
+      - "Check token predictability"
+      - "Verify secure flag on auth cookies"
+
+  - id: "WSTG-ATHN-06"
+    name: "Test for Browser Cache Weaknesses"
+    checks:
+      - "Check Cache-Control headers on auth pages"
+      - "Verify no-store on sensitive responses"
+
+  - id: "WSTG-ATHN-07"
+    name: "Test for Weak Password Policy"
+    checks:
+      - "Minimum length requirements"
+      - "Complexity requirements"
+      - "Password history enforcement"
+
+  - id: "WSTG-ATHN-08"
+    name: "Test for Weak Security Question/Answer"
+    checks:
+      - "Check if security questions are used"
+      - "Verify question entropy"
+
+  - id: "WSTG-ATHN-09"
+    name: "Test for Weak Password Change or Reset"
+    checks:
+      - "Password reset token entropy"
+      - "Reset token expiration"
+      - "Rate limiting on reset endpoint"
+
+  - id: "WSTG-ATHN-10"
+    name: "Test for Weaker Authentication in Alternative Channel"
+    checks:
+      - "Compare mobile vs web auth"
+      - "Check API auth vs web auth"
+      - "Verify consistent policy across channels"
+
+risk_scoring: "CVSS_3.1"
+report_format: "LUPISE"

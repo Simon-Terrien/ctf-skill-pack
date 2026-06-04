@@ -1,0 +1,37 @@
+# BioBrain configuration
+# Environment overrides: prefix BIOBRAIN_ (e.g. BIOBRAIN_PALACE_PATH)
+
+# Memory
+palace_path: "~/.mempalace/palace"
+# kg_path: null  # defaults to palace_path/knowledge_graph.sqlite3
+playbook_dir: "./configs/playbooks"
+
+# Identity
+identity_config: "./configs/identity_phantom.yaml"
+# mempalace_identity: "~/.mempalace/palace/identity.txt"
+
+# LLM
+llm_provider: "ollama"
+llm_model: "mistral-nemo"
+# llm_base_url: "http://localhost:11434"
+# llm_api_key: null
+llm_temperature: 0.3
+llm_max_tokens: 2048
+
+# Orchestrator
+max_steps: 10
+max_tool_calls: 20
+timeout_seconds: 300
+halt_on_escalation: true
+
+# Mode
+initial_mode: "normal"
+
+# Audit
+audit_log: "./audit.jsonl"
+audit_events: true
+audit_traces: true
+
+# Context
+wing: "wing_adeo"
+# room: null

@@ -10,11 +10,12 @@ from pathlib import Path
 from .agent import SpecialistAgent
 from .bus import InMemoryBus, make_bus
 from .config import Topics
-from .contracts import Candidate, Category, Challenge
+from .contracts import Candidate, Category, Challenge, TraceEvent
 from .gate import Gate
+from .engines import engine_for_category
 from .memory import InMemoryWorkingMemory, make_working_memory
 from .orchestrator import Orchestrator
-from .trace_recorder import iter_trace_events, summarize_trace_event, trace_path_for
+from .trace_recorder import TraceRecorder, iter_trace_events, summarize_trace_event, trace_path_for
 from .tools import Researcher
 
 
@@ -51,17 +52,23 @@ async def solve_local(args) -> None:
     bus = InMemoryBus()
     mem = InMemoryWorkingMemory()
     researcher = Researcher()
+    trace_dir = Path(os.getenv("CTF_TRACE_DIR", ".ctfrt/traces"))
+    trace_dir.mkdir(parents=True, exist_ok=True)
     await bus.start()
 
     # Start core loops in one process. Only the routed specialist is needed.
     cat = _category(args.category) or Category.misc
     loops = [
+        asyncio.create_task(TraceRecorder(bus, trace_dir=trace_dir).run()),
         asyncio.create_task(Orchestrator(bus, mem).run()),
         asyncio.create_task(Gate(bus, mem).run()),
-        asyncio.create_task(SpecialistAgent(cat, bus, mem, None, researcher).run()),
+        asyncio.create_task(SpecialistAgent(cat, bus, mem, None, researcher,
+                                            engine=engine_for_category(cat)).run()),
     ]
+    await asyncio.sleep(0.05)
 
     ch = Challenge(
+        id=args.name,
         name=args.name,
         category_hint=cat,
         artifacts=args.artifact or [],
@@ -69,22 +76,52 @@ async def solve_local(args) -> None:
         remote=args.remote,
         description=args.description or "",
     )
+    flag_sub = bus.subscribe(Topics.FLAGS, group="cli-solve-local")
+    trace_sub = bus.subscribe(Topics.TRACES, group="cli-solve-local-traces")
+    flag_task = asyncio.create_task(flag_sub.__anext__())
+    trace_task = asyncio.create_task(trace_sub.__anext__())
     await bus.publish(Topics.CHALLENGES, ch, key=ch.id)
-
     try:
         async with asyncio.timeout(args.timeout):
-            async for raw in bus.subscribe(Topics.FLAGS, group="cli-solve-local"):
-                c = Candidate.model_validate(raw)
-                if c.challenge_id == ch.id:
-                    if c.status == "solved":
-                        print(c.candidate)
-                    else:
-                        print(f"not solved: {c.status} {c.candidate}")
-                    return
+            while True:
+                done, _pending = await asyncio.wait(
+                    {flag_task, trace_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                if flag_task in done:
+                    c = Candidate.model_validate(flag_task.result())
+                    if c.challenge_id == ch.id:
+                        if c.status == "solved":
+                            for _ in range(100):
+                                events = iter_trace_events(trace_dir, ch.id)
+                                kinds = {ev.kind for ev in events}
+                                if (
+                                    "routed" in kinds
+                                    and "solved" in kinds
+                                    and ("candidate_accepted" in kinds or "gate_verdict" in kinds)
+                                ):
+                                    break
+                                await asyncio.sleep(0.02)
+                            print(c.candidate)
+                        else:
+                            print(f"not solved: {c.status} {c.candidate}")
+                        return
+                    flag_task = asyncio.create_task(flag_sub.__anext__())
+
+                if trace_task in done:
+                    ev = TraceEvent.model_validate(trace_task.result())
+                    if ev.challenge_id == ch.id and ev.kind in {"engine_error", "engine_no_candidate"}:
+                        detail = ev.payload.get("error") or ev.payload.get("reasoning") or ev.payload.get("reason", "")
+                        print(f"not solved: {ev.kind} {detail}".rstrip())
+                        return
+                    trace_task = asyncio.create_task(trace_sub.__anext__())
     finally:
+        flag_task.cancel()
+        trace_task.cancel()
         for task in loops:
             task.cancel()
-        await asyncio.gather(*loops, return_exceptions=True)
+        await asyncio.gather(flag_task, trace_task, *loops, return_exceptions=True)
         await mem.close()
         await bus.stop()
 

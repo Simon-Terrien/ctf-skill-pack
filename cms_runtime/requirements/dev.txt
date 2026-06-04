@@ -1,0 +1,6 @@
+# Development tooling.
+-r base.txt
+pytest>=7.4
+pytest-cov>=4.1
+ruff>=0.1.0
+mypy>=1.5

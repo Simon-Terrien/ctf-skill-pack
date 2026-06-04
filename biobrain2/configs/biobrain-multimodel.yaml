@@ -1,0 +1,47 @@
+# BioBrain agentic runtime configuration — multi-model
+
+palace_path: "~/.mempalace/palace"
+playbook_dir: "./configs/playbooks"
+identity_config: "./configs/identity_phantom.yaml"
+
+# Multi-model routing — each role gets a specialized model
+models:
+  planner:
+    model: "qwen3.6"
+    temperature: 0.3
+    max_tokens: 2048
+  coder:
+    model: "qwen3-coder"
+    temperature: 0.2
+    max_tokens: 4096
+  critic:
+    model: "qwen36-a3b-q4km"
+    temperature: 0.4
+    max_tokens: 2048
+  reasoning:
+    model: "zaya1-8b"
+    temperature: 0.3
+    max_tokens: 2048
+  fast:
+    model: "qwen3.5:4b"
+    temperature: 0.2
+    max_tokens: 512
+  security:
+    model: "qwen3.6"
+    temperature: 0.3
+    max_tokens: 2048
+
+# Orchestrator
+max_steps: 10
+max_tool_calls: 20
+timeout_seconds: 300
+halt_on_escalation: true
+
+# Mode
+initial_mode: "normal"
+
+# Audit
+audit_log: "./audit.jsonl"
+
+# Context
+wing: "wing_adeo"

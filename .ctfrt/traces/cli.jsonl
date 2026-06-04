@@ -1,0 +1,10 @@
+{"id":"98e9d118b94e","challenge_id":"cli","category":null,"kind":"routed","payload":{"category":"misc","triage":{"type":"misc","artifact_types":["text"],"lessons":[]}},"ts":1780501851.9389176}
+{"id":"2d834c127049","challenge_id":"cli","category":"misc","kind":"task_started","payload":{"category":"misc"},"ts":1780501851.9390397}
+{"id":"c02a7508fe88","challenge_id":"cli","category":"misc","kind":"candidate_emitted","payload":{"source":"static-artifact-scan"},"ts":1780501851.939296}
+{"id":"a3afa01fbdef","challenge_id":"cli","category":null,"kind":"candidate_accepted","payload":{"candidate_id":"c6a260c34168","accepted":true,"status":"solved","validation_level":"reproduced","format_match":true,"local_validation":"passed","oracle_validation":"not_available","technique":["static-artifact-scan"],"evidence_count":2},"ts":1780501851.941019}
+{"id":"e9031360320a","challenge_id":"cli","category":null,"kind":"solved","payload":{"flag":"CTF{cli_static_win}","category":"misc","technique":["static-artifact-scan"],"source":"misc:static-artifact-scan"},"ts":1780501851.9411545}
+{"id":"dd1649627621","challenge_id":"cli","category":null,"kind":"routed","payload":{"category":"misc","triage":{"type":"misc","artifact_types":["text"],"lessons":[]}},"ts":1780557816.8986995}
+{"id":"fb537e909e60","challenge_id":"cli","category":null,"kind":"routed","payload":{"category":"misc","triage":{"type":"misc","artifact_types":["text"],"lessons":[]}},"ts":1780557836.3430195}
+{"id":"04a8fef01d01","challenge_id":"cli","category":null,"kind":"routed","payload":{"category":"misc","triage":{"type":"misc","artifact_types":["text"],"lessons":[]}},"ts":1780557864.5432098}
+{"id":"1427abc6a822","challenge_id":"cli","category":null,"kind":"routed","payload":{"category":"misc","triage":{"type":"misc","artifact_types":["text"],"lessons":[]}},"ts":1780557882.4566307}
+{"id":"f057e65611f1","challenge_id":"cli","category":null,"kind":"routed","payload":{"category":"misc","triage":{"type":"misc","artifact_types":["text"],"lessons":[]}},"ts":1780557920.4745193}

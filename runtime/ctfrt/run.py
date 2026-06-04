@@ -18,7 +18,7 @@ from .log import get_logger, setup_logging, kv
 from .config import Topics
 from .contracts import Category, SandboxResult, TraceEvent
 from .gate import Gate
-from .llm import LLM
+from .engines import engine_for_category
 from .memory import make_working_memory
 from .orchestrator import Orchestrator
 from .agent import SpecialistAgent
@@ -100,7 +100,6 @@ async def main(component: str = "all") -> None:
     bus = make_bus()
     await bus.start()
     mem = make_working_memory()
-    llm = None if component in ("orchestrator", "gate", "sandbox") else LLM()
     researcher = Researcher()
 
     tasks: list = []
@@ -114,7 +113,8 @@ async def main(component: str = "all") -> None:
         tasks.append(sandbox_worker(bus))
     if component in ("all", "specialists"):
         for cat in Category:
-            tasks.append(SpecialistAgent(cat, bus, mem, llm, researcher).run())
+            tasks.append(SpecialistAgent(cat, bus, mem, None, researcher,
+                                         engine=engine_for_category(cat)).run())
 
     try:
         await asyncio.gather(*tasks)
