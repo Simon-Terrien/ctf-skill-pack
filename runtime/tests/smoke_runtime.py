@@ -482,6 +482,69 @@ def test_trace_cli_show_and_export(tmp_path: Path):
     assert result == str(exported)
 
 
+def test_trace_cli_show_reverse_analysis_details(tmp_path: Path):
+    trace_file = tmp_path / "rev-flow.jsonl"
+    trace_file.write_text(
+        "\n".join([
+            json.dumps({
+                "challenge_id": "rev-flow",
+                "kind": "reverse_next_action",
+                "payload": {
+                    "run_id": "run-1",
+                    "next_actions": ["follow_string_references", "disassembly_summary"],
+                    "inferred_techniques": ["string-anchor-analysis"],
+                    "confidence": 0.75,
+                },
+            }),
+            json.dumps({
+                "challenge_id": "rev-flow",
+                "kind": "reverse_tool_result",
+                "payload": {
+                    "run_id": "run-1",
+                    "tool": "objdump_disassembly",
+                    "exit_code": 0,
+                    "summary_line_count": 10,
+                    "facts": {"function_labels": ["main"], "compare_imports": ["strcmp"]},
+                },
+            }),
+            json.dumps({
+                "challenge_id": "rev-flow",
+                "kind": "reverse_check_path",
+                "payload": {
+                    "run_id": "run-1",
+                    "compare_symbols": ["strcmp"],
+                    "candidate_calls": ["call 1070 <strcmp@plt>"],
+                    "candidate_branches": ["jne 1108"],
+                    "confidence": 0.56,
+                },
+            }),
+            json.dumps({
+                "challenge_id": "rev-flow",
+                "kind": "engine_no_candidate",
+                "payload": {
+                    "run_id": "run-1",
+                    "reasoning": ["checklist: systematic verification"],
+                    "evidence": ["audit: no flag recovered"],
+                    "technique": ["string-anchor-analysis"],
+                },
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "runtime"
+    out = subprocess.check_output([
+        sys.executable, "-m", "ctfrt.cli", "show-trace",
+        "--challenge-id", "rev-flow",
+        "--trace-dir", str(tmp_path),
+    ], text=True, env=env)
+    assert "reverse_next_action actions=follow_string_references,disassembly_summary" in out
+    assert "reverse_tool_result tool=objdump_disassembly exit=0 compare=1 labels=1 summary=10" in out
+    assert "reverse_check_path compare=1 calls=1 branches=1 confidence=0.56" in out
+    assert "engine_no_candidate technique=string-anchor-analysis" in out
+    assert "audit: no flag recovered" in out
+
+
 def test_cli_init_workdir_json(tmp_path: Path):
     artifact = tmp_path / "note.txt"
     artifact.write_text("hello", encoding="utf-8")
@@ -1172,6 +1235,7 @@ TESTS = [
     test_trace_recorder_persists_solved_trace,
     test_trace_recorder_redacts_flag_payload_by_default,
     test_trace_cli_show_and_export,
+    test_trace_cli_show_reverse_analysis_details,
     test_cli_init_workdir_json,
     test_cli_inspect_json,
     test_cli_validate_candidate_json_solved,

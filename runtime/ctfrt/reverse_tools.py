@@ -16,6 +16,8 @@ _MAX_IMPORTS = 64
 _MAX_SECTIONS = 64
 _MAX_DETAIL_LINES = 80
 _MAX_DETAIL_CHARS = 6000
+_MAX_STRING_REF_ITEMS = 24
+_MAX_STRING_REF_NEARBY = 24
 _ANCHOR_WORDS = ("pass", "password", "wrong", "correct", "success", "fail", "usage", "key", "secret")
 _COMPARE_IMPORTS = {"strcmp", "strncmp", "memcmp"}
 _INPUT_IMPORTS = {"scanf", "fgets", "read", "gets", "getline", "getchar"}
@@ -46,6 +48,17 @@ class StaticDetailSummary(BaseModel):
     imported_input_symbols: list[str] = Field(default_factory=list)
     candidate_anchors: list[str] = Field(default_factory=list)
     disassembly_excerpt: str = ""
+
+
+class StringReferenceSummary(BaseModel):
+    path: str
+    anchors: list[str] = Field(default_factory=list)
+    rodata_offsets: list[str] = Field(default_factory=list)
+    disassembly_hits: list[str] = Field(default_factory=list)
+    nearby_instructions: list[str] = Field(default_factory=list)
+    tool_used: str
+    truncated: bool
+    error: str | None = None
 
 
 def _kind_and_magic(data: bytes) -> tuple[str, str]:
@@ -286,6 +299,127 @@ def _cap_disassembly_excerpt(text: str) -> tuple[str, int, bool]:
     return excerpt, len(kept), truncated or len(kept) < len(lines)
 
 
+def _append_limited(values: list[str], entry: str, limit: int) -> bool:
+    if entry in values:
+        return False
+    if len(values) >= limit:
+        return True
+    values.append(entry)
+    return False
+
+
+def _parse_readelf_section_ranges(text: str) -> dict[str, tuple[int, int, int]]:
+    ranges: dict[str, tuple[int, int, int]] = {}
+    for line in text.splitlines():
+        match = re.search(
+            r"\[\s*\d+\]\s+([.\w$@+-]+)\s+\S+\s+([0-9A-Fa-f]+)\s+([0-9A-Fa-f]+)\s+([0-9A-Fa-f]+)",
+            line,
+        )
+        if not match:
+            continue
+        name, addr_hex, off_hex, size_hex = match.groups()
+        try:
+            ranges[name] = (int(addr_hex, 16), int(off_hex, 16), int(size_hex, 16))
+        except ValueError:
+            continue
+    return ranges
+
+
+def _parse_objdump_section_ranges(text: str) -> dict[str, tuple[int, int, int]]:
+    ranges: dict[str, tuple[int, int, int]] = {}
+    for line in text.splitlines():
+        match = re.match(
+            r"\s*\d+\s+([.\w$@+-]+)\s+([0-9A-Fa-f]+)\s+([0-9A-Fa-f]+)\s+([0-9A-Fa-f]+)",
+            line,
+        )
+        if not match:
+            continue
+        name, size_hex, addr_hex, off_hex = match.groups()
+        try:
+            ranges[name] = (int(addr_hex, 16), int(off_hex, 16), int(size_hex, 16))
+        except ValueError:
+            continue
+    return ranges
+
+
+def _find_anchor_offsets(data: bytes, anchors: list[str]) -> list[tuple[str, int]]:
+    hits: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+    for anchor in anchors:
+        needle = anchor.encode("latin-1", errors="ignore")
+        if not needle:
+            continue
+        start = 0
+        while True:
+            offset = data.find(needle, start)
+            if offset < 0:
+                break
+            entry = (anchor, offset)
+            if entry not in seen:
+                seen.add(entry)
+                hits.append(entry)
+                if len(hits) >= _MAX_STRING_REF_ITEMS:
+                    return hits
+            start = offset + 1
+    return hits
+
+
+def _offset_label(
+    anchor: str,
+    file_offset: int,
+    rodata_range: tuple[int, int, int] | None,
+) -> tuple[str, str | None]:
+    file_label = f"{anchor} @ file+0x{file_offset:x}"
+    if not rodata_range:
+        return file_label, None
+    addr, section_off, size = rodata_range
+    if not (section_off <= file_offset < section_off + size):
+        return file_label, None
+    relative = file_offset - section_off
+    virtual = addr + relative
+    return (
+        f"{anchor} @ .rodata+0x{relative:x} (va 0x{virtual:x}, file+0x{file_offset:x})",
+        f"{virtual:x}",
+    )
+
+
+def _scan_disassembly_for_addresses(
+    text: str,
+    address_tokens: list[str],
+) -> tuple[list[str], list[str], bool]:
+    if not text or not address_tokens:
+        return [], [], False
+
+    token_set = {token.lower() for token in address_tokens if token}
+    lines = text.splitlines()
+    hits: list[str] = []
+    nearby: list[str] = []
+    truncated = False
+    seen_nearby: set[str] = set()
+
+    for idx, line in enumerate(lines):
+        low = line.lower()
+        if not any(token in low for token in token_set):
+            continue
+        truncated = _append_limited(hits, line.strip(), _MAX_STRING_REF_ITEMS) or truncated
+        start = max(0, idx - 1)
+        end = min(len(lines), idx + 2)
+        for near in lines[start:end]:
+            compact = near.strip()
+            if compact in seen_nearby:
+                continue
+            if len(nearby) >= _MAX_STRING_REF_NEARBY:
+                truncated = True
+                break
+            seen_nearby.add(compact)
+            nearby.append(compact)
+        if len(hits) >= _MAX_STRING_REF_ITEMS:
+            truncated = True
+            break
+
+    return hits, nearby, truncated
+
+
 def collect_static_detail(
     path: Path,
     preanalysis: ReverseArtifactSummary | None = None,
@@ -321,6 +455,71 @@ def collect_static_detail(
     )
 
 
+def follow_string_references(path: Path, anchors: list[str]) -> StringReferenceSummary:
+    normalized_anchors: list[str] = []
+    seen_anchors: set[str] = set()
+    for anchor in anchors:
+        compact = anchor.strip()
+        if not compact or compact in seen_anchors:
+            continue
+        seen_anchors.add(compact)
+        normalized_anchors.append(compact)
+        if len(normalized_anchors) >= 12:
+            break
+
+    data = path.read_bytes()
+    tool_parts = ["embedded_offsets"]
+    truncated = False
+    error: str | None = None
+    rodata_offsets: list[str] = []
+    disassembly_hits: list[str] = []
+    nearby_instructions: list[str] = []
+    address_tokens: list[str] = []
+
+    section_ranges: dict[str, tuple[int, int, int]] = {}
+    readelf = shutil.which("readelf")
+    objdump = shutil.which("objdump")
+    if readelf:
+        tool_parts.append("readelf")
+        section_ranges = _parse_readelf_section_ranges(_run_tool([readelf, "-W", "-S", str(path)]))
+    elif objdump:
+        tool_parts.append("objdump")
+        section_ranges = _parse_objdump_section_ranges(_run_tool([objdump, "-h", str(path)]))
+
+    anchor_hits = _find_anchor_offsets(data, normalized_anchors)
+    rodata_range = section_ranges.get(".rodata")
+    for anchor, file_offset in anchor_hits:
+        label, addr_token = _offset_label(anchor, file_offset, rodata_range)
+        truncated = _append_limited(rodata_offsets, label, _MAX_STRING_REF_ITEMS) or truncated
+        if addr_token:
+            address_tokens.append(addr_token)
+            address_tokens.append(f"0x{addr_token}")
+
+    if objdump:
+        if "objdump" not in tool_parts:
+            tool_parts.append("objdump")
+        dump_text = _run_tool([objdump, "-d", "-M", "intel", str(path)])
+        disassembly_hits, nearby_instructions, hit_truncated = _scan_disassembly_for_addresses(
+            dump_text,
+            address_tokens,
+        )
+        truncated = truncated or hit_truncated
+
+    if not rodata_offsets and not disassembly_hits:
+        error = "no string references found"
+
+    return StringReferenceSummary(
+        path=str(path),
+        anchors=normalized_anchors,
+        rodata_offsets=rodata_offsets,
+        disassembly_hits=disassembly_hits,
+        nearby_instructions=nearby_instructions,
+        tool_used="+".join(tool_parts),
+        truncated=truncated,
+        error=error,
+    )
+
+
 def format_static_detail(summary: StaticDetailSummary) -> str:
     lines = [
         f"- path={summary.path}",
@@ -339,4 +538,23 @@ def format_static_detail(summary: StaticDetailSummary) -> str:
     if summary.disassembly_excerpt:
         lines.append("  disassembly_excerpt:")
         lines.append(summary.disassembly_excerpt)
+    return "\n".join(lines)
+
+
+def format_string_references(summary: StringReferenceSummary) -> str:
+    lines = [
+        f"- path={summary.path}",
+        f"  tool_used={summary.tool_used}",
+        f"  truncated={summary.truncated}",
+    ]
+    if summary.anchors:
+        lines.append("  anchors=" + " | ".join(summary.anchors))
+    if summary.rodata_offsets:
+        lines.append("  rodata_offsets=" + " | ".join(summary.rodata_offsets))
+    if summary.disassembly_hits:
+        lines.append("  disassembly_hits=" + " | ".join(summary.disassembly_hits))
+    if summary.nearby_instructions:
+        lines.append("  nearby_instructions=" + " | ".join(summary.nearby_instructions))
+    if summary.error:
+        lines.append(f"  error={summary.error}")
     return "\n".join(lines)

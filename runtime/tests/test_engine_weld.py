@@ -21,7 +21,10 @@ from ctfrt.contracts import Candidate, Category, Task
 from ctfrt.engines import StubReverseEngine, EngineResult
 from ctfrt.gate import Gate
 from ctfrt.memory import InMemoryWorkingMemory
-from ctfrt.reverse_tools import analyze_artifact, collect_static_detail
+from ctfrt.reverse_check_path import extract_check_path
+from ctfrt.reverse_decision import ReverseFactBundle, build_fact_bundle, evaluate_reverse_decision, refine_reverse_decision
+from ctfrt.reverse_tool_registry import ReverseToolResult, format_reverse_tool_result, run_reverse_tool, select_tools_for_next_actions
+from ctfrt.reverse_tools import analyze_artifact, collect_static_detail, follow_string_references
 from ctfrt.tools import Researcher
 
 
@@ -415,6 +418,658 @@ async def test_static_detail_classifies_imports_and_anchors(tmp_path: Path):
     assert any("wrong" in value.lower() for value in detail.interesting_strings)
 
 
+async def test_reverse_decision_success_failure_strings_trigger_follow_string_references(tmp_path: Path):
+    from ctfrt.reverse_tools import ReverseArtifactSummary
+
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    summary = ReverseArtifactSummary(
+        path=str(art),
+        kind="elf",
+        magic="7f454c46",
+        size=art.stat().st_size,
+        sha256="deadbeef",
+        strings=["Wrong password", "Success"],
+        imports=[],
+        sections=[".text", ".rodata", ".symtab"],
+        stripped=False,
+        tools_used=["embedded_strings"],
+    )
+
+    result = evaluate_reverse_decision([summary])
+    assert "success_failure_strings_present" in result.matched_rules
+    assert "follow_string_references" in result.next_actions
+    assert "string-anchor-analysis" in result.inferred_techniques
+
+
+async def test_reverse_decision_compare_imports_trigger_string_reference_analysis(tmp_path: Path):
+    from ctfrt.reverse_tools import ReverseArtifactSummary
+
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    summary = ReverseArtifactSummary(
+        path=str(art),
+        kind="elf",
+        magic="7f454c46",
+        size=art.stat().st_size,
+        sha256="deadbeef",
+        strings=[],
+        imports=["strcmp@GLIBC_2.2.5", "memcmp"],
+        sections=[".text", ".rodata", ".symtab"],
+        stripped=False,
+        tools_used=["embedded_strings"],
+    )
+
+    result = evaluate_reverse_decision([summary])
+    assert "compare_imports_present" in result.matched_rules
+    assert "string_reference_analysis" in result.next_actions
+    assert "direct-compare" in result.inferred_techniques
+
+
+async def test_reverse_decision_stripped_and_missing_symtab_trigger_disassembly_summary(tmp_path: Path):
+    from ctfrt.reverse_tools import ReverseArtifactSummary
+
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    summary = ReverseArtifactSummary(
+        path=str(art),
+        kind="elf",
+        magic="7f454c46",
+        size=art.stat().st_size,
+        sha256="deadbeef",
+        strings=["opaque branch"],
+        imports=[],
+        sections=[".text", ".rodata"],
+        stripped=True,
+        tools_used=["embedded_strings"],
+    )
+
+    result = evaluate_reverse_decision([summary])
+    assert "stripped_plus_no_symbols" in result.matched_rules
+    assert "disassembly_summary" in result.next_actions
+    assert "stripped-binary" in result.inferred_techniques
+
+
+async def test_reverse_decision_no_matching_rules_returns_empty_result(tmp_path: Path):
+    from ctfrt.reverse_tools import ReverseArtifactSummary
+
+    art = tmp_path / "note.txt"
+    art.write_text("plain note")
+    summary = ReverseArtifactSummary(
+        path=str(art),
+        kind="binary",
+        magic="706c6169",
+        size=art.stat().st_size,
+        sha256="deadbeef",
+        strings=["just noise"],
+        imports=[],
+        sections=[".data"],
+        stripped=False,
+        tools_used=["embedded_strings"],
+    )
+
+    result = evaluate_reverse_decision([summary])
+    assert result.matched_rules == []
+    assert result.inferred_techniques == []
+    assert result.confidence == 0.0
+    assert result.next_actions == []
+    assert result.handoff_candidates == []
+    assert result.dynamic_allowed is False
+
+
+async def test_reverse_decision_refines_from_compare_import_facts(tmp_path: Path):
+    from ctfrt.reverse_tools import ReverseArtifactSummary
+
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    base = evaluate_reverse_decision([
+        ReverseArtifactSummary(
+            path=str(art),
+            kind="elf",
+            magic="7f454c46",
+            size=art.stat().st_size,
+            sha256="deadbeef",
+            strings=[],
+            imports=[],
+            sections=[".text", ".rodata", ".symtab"],
+            stripped=False,
+            tools_used=["embedded_strings"],
+        )
+    ])
+    facts = build_fact_bundle([
+        ReverseToolResult(
+            name="readelf_symbols",
+            path=str(art),
+            read_only=True,
+            sandbox_required=False,
+            timeout_s=1.0,
+            facts={"imported_symbols": ["strcmp"], "compare_imports": ["strcmp"], "input_imports": []},
+        )
+    ])
+    refined = refine_reverse_decision(base, facts)
+    assert "facts_compare_imports_present" in refined.matched_rules
+    assert "string_reference_analysis" in refined.next_actions
+    assert "direct-compare" in refined.inferred_techniques
+
+
+async def test_reverse_decision_refines_from_input_import_facts(tmp_path: Path):
+    from ctfrt.reverse_tools import ReverseArtifactSummary
+
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    base = evaluate_reverse_decision([
+        ReverseArtifactSummary(
+            path=str(art),
+            kind="elf",
+            magic="7f454c46",
+            size=art.stat().st_size,
+            sha256="deadbeef",
+            strings=[],
+            imports=[],
+            sections=[".text"],
+            stripped=False,
+            tools_used=["embedded_strings"],
+        )
+    ])
+    facts = build_fact_bundle([
+        ReverseToolResult(
+            name="readelf_symbols",
+            path=str(art),
+            read_only=True,
+            sandbox_required=False,
+            timeout_s=1.0,
+            facts={"imported_symbols": ["read"], "input_imports": ["read"]},
+        )
+    ])
+    refined = refine_reverse_decision(base, facts)
+    assert "facts_input_imports_present" in refined.matched_rules
+    assert "input_path_analysis" in refined.next_actions
+
+
+async def test_reverse_decision_refines_from_rodata_ascii_hints(tmp_path: Path):
+    from ctfrt.reverse_tools import ReverseArtifactSummary
+
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    base = evaluate_reverse_decision([
+        ReverseArtifactSummary(
+            path=str(art),
+            kind="elf",
+            magic="7f454c46",
+            size=art.stat().st_size,
+            sha256="deadbeef",
+            strings=[],
+            imports=[],
+            sections=[".text"],
+            stripped=False,
+            tools_used=["embedded_strings"],
+        )
+    ])
+    facts = build_fact_bundle([
+        ReverseToolResult(
+            name="objdump_rodata",
+            path=str(art),
+            read_only=True,
+            sandbox_required=False,
+            timeout_s=1.0,
+            facts={"has_rodata": True, "ascii_hints": ["Wrong password"]},
+        )
+    ])
+    refined = refine_reverse_decision(base, facts)
+    assert "facts_rodata_ascii_hints" in refined.matched_rules
+    assert "follow_string_references" in refined.next_actions
+
+
+async def test_reverse_decision_refines_from_missing_symtab(tmp_path: Path):
+    from ctfrt.reverse_tools import ReverseArtifactSummary
+
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    base = evaluate_reverse_decision([
+        ReverseArtifactSummary(
+            path=str(art),
+            kind="elf",
+            magic="7f454c46",
+            size=art.stat().st_size,
+            sha256="deadbeef",
+            strings=[],
+            imports=[],
+            sections=[".text"],
+            stripped=False,
+            tools_used=["embedded_strings"],
+        )
+    ])
+    facts = build_fact_bundle([
+        ReverseToolResult(
+            name="readelf_sections",
+            path=str(art),
+            read_only=True,
+            sandbox_required=False,
+            timeout_s=1.0,
+            facts={"has_symtab": False},
+        )
+    ])
+    refined = refine_reverse_decision(base, facts)
+    assert "facts_symtab_missing" in refined.matched_rules
+    assert "disassembly_summary" in refined.next_actions
+    assert "stripped-binary" in refined.inferred_techniques
+
+
+async def test_follow_string_references_returns_anchors_for_fake_elf(tmp_path: Path):
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32 + b"Wrong password\x00Success\x00")
+
+    result = follow_string_references(art, ["Wrong password", "Success"])
+    assert result.anchors == ["Wrong password", "Success"]
+    assert any("Wrong password" in entry for entry in result.rodata_offsets)
+    assert any("Success" in entry for entry in result.rodata_offsets)
+    assert "embedded_offsets" in result.tool_used
+
+
+async def test_follow_string_references_missing_objdump_and_readelf_degrades_cleanly(tmp_path: Path):
+    import ctfrt.reverse_tools as reverse_tools
+
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    old_which = shutil.which
+    try:
+        shutil.which = lambda _name: None
+        result = follow_string_references(art, ["Missing anchor"])
+        assert result.anchors == ["Missing anchor"]
+        assert result.rodata_offsets == []
+        assert result.disassembly_hits == []
+        assert result.nearby_instructions == []
+        assert result.tool_used == "embedded_offsets"
+        assert result.error == "no string references found"
+    finally:
+        shutil.which = old_which
+
+
+async def test_extract_check_path_finds_compare_call(tmp_path: Path):
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    summary = extract_check_path(
+        art,
+        [
+            ReverseToolResult(
+                name="objdump_disassembly",
+                path=str(art),
+                read_only=True,
+                sandbox_required=False,
+                timeout_s=1.0,
+                stdout="\n".join([
+                    "0000000000001140 <main>:",
+                    "1148: e8 e3 fe ff ff call 1030 <strcmp@plt>",
+                ]),
+                facts={"compare_imports": ["strcmp"]},
+            )
+        ],
+    )
+    assert "strcmp" in summary.compare_symbols
+    assert any("strcmp" in line for line in summary.candidate_calls)
+
+
+async def test_extract_check_path_infers_compare_call_without_symbol_facts(tmp_path: Path):
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    summary = extract_check_path(
+        art,
+        [
+            ReverseToolResult(
+                name="objdump_disassembly",
+                path=str(art),
+                read_only=True,
+                sandbox_required=False,
+                timeout_s=1.0,
+                stdout="\n".join([
+                    "0000000000001140 <main>:",
+                    "1148: e8 e3 fe ff ff call 1070 <strcmp@plt>",
+                ]),
+                facts={},
+            )
+        ],
+    )
+    assert "strcmp" in summary.compare_symbols
+    assert any("strcmp" in line for line in summary.candidate_calls)
+
+
+async def test_extract_check_path_keeps_helper_window_before_compare(tmp_path: Path):
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    summary = extract_check_path(
+        art,
+        [
+            ReverseToolResult(
+                name="objdump_disassembly",
+                path=str(art),
+                read_only=True,
+                sandbox_required=False,
+                timeout_s=1.0,
+                stdout="\n".join([
+                    "10bf: 48 89 ef mov rdi,rbp",
+                    "10c2: e8 59 01 00 00 call 1220 <sub_1220>",
+                    "10c7: 48 89 ef mov rdi,rbp",
+                    "10ca: 48 89 c6 mov rsi,rax",
+                    "10d0: e8 9b ff ff ff call 1070 <strcmp@plt>",
+                ]),
+                facts={"compare_imports": ["strcmp"]},
+            )
+        ],
+    )
+    assert any("call 1220 <sub_1220>" in window for window in summary.nearby_windows)
+    assert any("call 1070 <strcmp@plt>" in window for window in summary.nearby_windows)
+
+
+async def test_extract_check_path_finds_branch_window(tmp_path: Path):
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    summary = extract_check_path(
+        art,
+        [
+            ReverseToolResult(
+                name="objdump_disassembly",
+                path=str(art),
+                read_only=True,
+                sandbox_required=False,
+                timeout_s=1.0,
+                stdout="\n".join([
+                    "0000000000001140 <main>:",
+                    "1150: 85 c0 test eax,eax",
+                    "1152: 75 0a jne 115e <main+0x1e>",
+                ]),
+                facts={},
+            )
+        ],
+    )
+    assert any("jne" in line for line in summary.candidate_branches)
+    assert summary.nearby_windows
+
+
+async def test_extract_check_path_includes_rodata_hints(tmp_path: Path):
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    summary = extract_check_path(
+        art,
+        [
+            ReverseToolResult(
+                name="objdump_rodata",
+                path=str(art),
+                read_only=True,
+                sandbox_required=False,
+                timeout_s=1.0,
+                facts={"ascii_hints": ["Wrong password", "Success"]},
+            ),
+            ReverseToolResult(
+                name="objdump_disassembly",
+                path=str(art),
+                read_only=True,
+                sandbox_required=False,
+                timeout_s=1.0,
+                stdout="0000000000001140 <main>:",
+                facts={},
+            ),
+        ],
+    )
+    assert "Wrong password" in summary.rodata_hints
+    assert "Success" in summary.rodata_hints
+
+
+async def test_extract_check_path_missing_symbols_degrades_cleanly(tmp_path: Path):
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    summary = extract_check_path(
+        art,
+        [
+            ReverseToolResult(
+                name="objdump_disassembly",
+                path=str(art),
+                read_only=True,
+                sandbox_required=False,
+                timeout_s=1.0,
+                stdout="0000000000001140 <sub_1140>:",
+                facts={},
+            )
+        ],
+    )
+    assert summary.candidate_calls == []
+    assert summary.error == "no named check path found"
+
+
+async def test_extract_check_path_does_not_execute_or_read_artifact(tmp_path: Path):
+    import pathlib
+
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    old_read_bytes = pathlib.Path.read_bytes
+    try:
+        pathlib.Path.read_bytes = lambda self: (_ for _ in ()).throw(AssertionError("artifact should not be read"))
+        summary = extract_check_path(
+            art,
+            [
+                ReverseToolResult(
+                    name="objdump_disassembly",
+                    path=str(art),
+                    read_only=True,
+                    sandbox_required=False,
+                    timeout_s=1.0,
+                    stdout="1150: 85 c0 test eax,eax\n1152: 75 0a jne 115e <main+0x1e>",
+                    facts={},
+                )
+            ],
+        )
+        assert summary.candidate_branches
+    finally:
+        pathlib.Path.read_bytes = old_read_bytes
+
+
+async def test_reverse_tool_missing_degrades_cleanly(tmp_path: Path):
+    import ctfrt.reverse_tool_registry as registry
+
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    old_which = registry.which
+    try:
+        registry.which = lambda _name: None
+        result = run_reverse_tool(art, "objdump_disassembly")
+        assert result.tool_missing is True
+        assert result.error == "missing tool: objdump"
+        assert result.command == []
+    finally:
+        registry.which = old_which
+
+
+async def test_reverse_tool_runner_uses_no_shell(tmp_path: Path):
+    import ctfrt.reverse_tool_registry as registry
+
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    old_which = registry.which
+    old_run = registry.subprocess.run
+    seen = {}
+    try:
+        registry.which = lambda name: f"/usr/bin/{name}"
+
+        def fake_run(*args, **kwargs):
+            seen["args"] = args
+            seen["kwargs"] = kwargs
+
+            class Result:
+                returncode = 0
+                stdout = "ok"
+                stderr = ""
+
+            return Result()
+
+        registry.subprocess.run = fake_run
+        result = run_reverse_tool(art, "readelf_header")
+        assert result.exit_code == 0
+        assert seen["kwargs"]["shell"] is False
+        assert seen["kwargs"]["timeout"] == 1.0
+    finally:
+        registry.which = old_which
+        registry.subprocess.run = old_run
+
+
+async def test_reverse_tool_never_executes_artifact_directly(tmp_path: Path):
+    import ctfrt.reverse_tool_registry as registry
+
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    old_which = registry.which
+    old_run = registry.subprocess.run
+    seen = {}
+    try:
+        registry.which = lambda name: f"/usr/bin/{name}"
+
+        def fake_run(*args, **kwargs):
+            seen["command"] = args[0]
+
+            class Result:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            return Result()
+
+        registry.subprocess.run = fake_run
+        run_reverse_tool(art, "objdump_disassembly")
+        assert seen["command"][0] != str(art)
+        assert seen["command"][-1] == str(art)
+    finally:
+        registry.which = old_which
+        registry.subprocess.run = old_run
+
+
+async def test_reverse_tool_output_is_capped(tmp_path: Path):
+    import ctfrt.reverse_tool_registry as registry
+
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    old_which = registry.which
+    old_run = registry.subprocess.run
+    try:
+        registry.which = lambda name: f"/usr/bin/{name}"
+
+        def fake_run(*args, **kwargs):
+            class Result:
+                returncode = 0
+                stdout = "A" * 5000
+                stderr = "B" * 5000
+
+            return Result()
+
+        registry.subprocess.run = fake_run
+        result = run_reverse_tool(art, "objdump_disassembly")
+        assert len(result.stdout) == 4000
+        assert len(result.stderr) == 4000
+        assert result.truncated is True
+    finally:
+        registry.which = old_which
+        registry.subprocess.run = old_run
+
+
+async def test_reverse_tool_result_extracts_summary_lines(tmp_path: Path):
+    import ctfrt.reverse_tool_registry as registry
+
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    old_which = registry.which
+    old_run = registry.subprocess.run
+    try:
+        registry.which = lambda name: f"/usr/bin/{name}"
+
+        def fake_run(*args, **kwargs):
+            class Result:
+                returncode = 0
+                stdout = "\n".join([
+                    "Symbol table '.dynsym' contains 3 entries:",
+                    "   Num:    Value          Size Type    Bind   Vis      Ndx Name",
+                    "     0: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND strcmp@GLIBC_2.2.5",
+                    "     1: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND memcmp@GLIBC_2.2.5",
+                ])
+                stderr = ""
+
+            return Result()
+
+        registry.subprocess.run = fake_run
+        result = run_reverse_tool(art, "readelf_symbols")
+        assert any("strcmp" in line for line in result.summary_lines)
+        assert any("memcmp" in line for line in result.summary_lines)
+    finally:
+        registry.which = old_which
+        registry.subprocess.run = old_run
+
+
+async def test_reverse_tool_result_extracts_structured_facts(tmp_path: Path):
+    import ctfrt.reverse_tool_registry as registry
+
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    old_which = registry.which
+    old_run = registry.subprocess.run
+    try:
+        registry.which = lambda name: f"/usr/bin/{name}"
+
+        def fake_run(*args, **kwargs):
+            class Result:
+                returncode = 0
+                stdout = "\n".join([
+                    "Class:                             ELF64",
+                    "Type:                              DYN (Position-Independent Executable file)",
+                    "Machine:                           Advanced Micro Devices X86-64",
+                    "Entry point address:               0x1050",
+                    "Requesting program interpreter:    /lib64/ld-linux-x86-64.so.2",
+                ])
+                stderr = ""
+
+            return Result()
+
+        registry.subprocess.run = fake_run
+        result = run_reverse_tool(art, "readelf_header")
+        assert result.facts["elf_class"] == "ELF64"
+        assert result.facts["pie"] is True
+        assert result.facts["entry_point"] == "0x1050"
+        assert result.facts["dynamically_linked"] is True
+    finally:
+        registry.which = old_which
+        registry.subprocess.run = old_run
+
+
+async def test_reverse_tool_formatter_includes_summary_block(tmp_path: Path):
+    import ctfrt.reverse_tool_registry as registry
+
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 32)
+    old_which = registry.which
+    old_run = registry.subprocess.run
+    try:
+        registry.which = lambda name: f"/usr/bin/{name}"
+
+        def fake_run(*args, **kwargs):
+            class Result:
+                returncode = 0
+                stdout = "ELF 64-bit LSB pie executable, x86-64"
+                stderr = ""
+
+            return Result()
+
+        registry.subprocess.run = fake_run
+        result = run_reverse_tool(art, "file_summary")
+        formatted = format_reverse_tool_result(result)
+        assert "summary:" in formatted
+        assert "ELF 64-bit LSB pie executable, x86-64" in formatted
+        assert "facts=" in formatted
+        assert "stdout_excerpt:" in formatted
+    finally:
+        registry.which = old_which
+        registry.subprocess.run = old_run
+
+
+async def test_reverse_action_mapping_for_follow_string_references(_tmp_path: Path):
+    tools = select_tools_for_next_actions(["follow_string_references"])
+    assert tools == ["objdump_rodata", "objdump_disassembly"]
+
+
 async def test_biobrain_adapter_emits_reverse_preanalysis_trace(tmp_path: Path):
     from ctfrt.engines import BioBrainAdapter
     import ctfrt.config as config
@@ -470,6 +1125,23 @@ async def test_biobrain_adapter_emits_reverse_preanalysis_trace(tmp_path: Path):
     assert "anchor_count" in static_event
     assert "compare_import_count" in static_event
     assert "input_import_count" in static_event
+    next_action_event = next((payload for kind, payload in seen if kind == "reverse_next_action"), None)
+    assert next_action_event is not None
+    assert "follow_string_references" in next_action_event["next_actions"]
+    assert "matched_rules" in next_action_event
+    tool_events = [payload for kind, payload in seen if kind == "reverse_tool_result"]
+    assert tool_events
+    tool_names = [payload["tool"] for payload in tool_events]
+    assert "objdump_rodata" in tool_names
+    assert "objdump_disassembly" in tool_names
+    assert any(payload["summary_line_count"] >= 0 for payload in tool_events)
+    assert all("facts" in payload for payload in tool_events)
+    refined_event = next((payload for kind, payload in seen if kind == "reverse_decision_refined"), None)
+    assert refined_event is not None
+    assert "matched_rules" in refined_event
+    check_path_event = next((payload for kind, payload in seen if kind == "reverse_check_path"), None)
+    assert check_path_event is not None
+    assert "confidence" in check_path_event
 
 
 async def test_reverse_tools_do_not_execute_artifact(tmp_path: Path):
@@ -493,12 +1165,127 @@ async def test_reverse_tools_do_not_execute_artifact(tmp_path: Path):
         reverse_tools._run_tool = fake_run_tool
         summary = reverse_tools.analyze_artifact(art)
         detail = reverse_tools.collect_static_detail(art, summary)
+        refs = reverse_tools.follow_string_references(art, ["puts", "strcmp"])
         assert summary.kind == "elf"
         assert calls
         assert detail.tool_used == "none"
+        assert refs.tool_used.startswith("embedded_offsets+readelf")
     finally:
         shutil.which = old_which
         reverse_tools._run_tool = old_run_tool
+
+
+async def test_reverse_registry_tools_do_not_execute_artifact(tmp_path: Path):
+    import ctfrt.reverse_tool_registry as registry
+
+    art = tmp_path / "fake-elf"
+    art.write_bytes(b"\x7fELF" + b"\x00" * 64 + b"puts\x00strcmp\x00")
+    old_which = registry.which
+    old_run = registry.subprocess.run
+    calls = []
+    try:
+        registry.which = lambda name: f"/usr/bin/{name}"
+
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            assert Path(args[0]).name in {"objdump", "readelf", "file", "checksec", "xxd"}
+            assert args[0] != str(art)
+            assert args[-1] == str(art) or any(str(art) in part for part in args)
+
+            class Result:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            return Result()
+
+        registry.subprocess.run = fake_run
+        run_reverse_tool(art, "objdump_rodata")
+        assert calls
+    finally:
+        registry.which = old_which
+        registry.subprocess.run = old_run
+
+
+async def test_biobrain_prompt_contains_reverse_decision_result(tmp_path: Path):
+    from ctfrt.engines import BioBrainAdapter
+    import ctfrt.engines as engines
+    import ctfrt.config as config
+    from ctfrt.workspace import register_artifacts
+
+    source = tmp_path / "selfkey-src"
+    source.write_bytes(
+        b"\x7fELF"
+        + b"\x00" * 64
+        + b"Wrong password\x00Success\x00strcmp\x00memcmp\x00"
+    )
+
+    captured = {}
+
+    class FakeCognitive:
+        result = ""
+        evidence = []
+        reasoning_trace = []
+
+    class FakeTrace:
+        halted_at = None
+        halt_reason = ""
+        audit_summary = "no candidate"
+        cognitive = FakeCognitive()
+        action_results = []
+
+    class CapturePipeline:
+        def process(self, content, source, metadata):
+            captured["content"] = content
+            captured["source"] = source
+            captured["metadata"] = metadata
+            return FakeTrace()
+
+    adapter = BioBrainAdapter(Category.reverse)
+    adapter._ensure_pipeline = lambda: CapturePipeline()
+    old_run_reverse_tool = engines.run_reverse_tool
+    old_root = config.settings.challenge_root
+    try:
+        def fake_run_reverse_tool(path: Path, tool_name: str) -> ReverseToolResult:
+            return ReverseToolResult(
+                name=tool_name,
+                path=str(path),
+                command=[f"/usr/bin/{tool_name}", str(path)],
+                read_only=True,
+                sandbox_required=False,
+                timeout_s=1.0,
+                exit_code=0,
+                stdout="raw output",
+                summary_lines=[f"{tool_name} summary line"],
+                facts={"tool_name": tool_name},
+            )
+
+        engines.run_reverse_tool = fake_run_reverse_tool
+        config.settings.challenge_root = str(tmp_path / "challenge-root")
+        workdir, artifacts = register_artifacts("selfkey", [str(source)])
+
+        await adapter.solve(Task(
+            challenge_id="selfkey",
+            workdir=workdir,
+            category=Category.reverse,
+            artifacts=artifacts,
+            flag_format=r"CTF\{[^}]+\}",
+        ))
+
+        assert "Reverse decision result:" in captured["content"]
+        assert "follow_string_references" in captured["content"]
+        assert "string-anchor-analysis" in captured["content"]
+        assert "matched_rules=success_failure_strings_present" in captured["content"]
+        assert "Reverse tool outputs:" in captured["content"]
+        assert "tool=objdump_rodata" in captured["content"]
+        assert "tool=objdump_disassembly" in captured["content"]
+        assert "summary:" in captured["content"]
+        assert "facts=" in captured["content"]
+        assert "Refined reverse decision:" in captured["content"]
+        assert "Check-path summary:" in captured["content"]
+    finally:
+        engines.run_reverse_tool = old_run_reverse_tool
+        config.settings.challenge_root = old_root
 
 
 TESTS = [
@@ -516,8 +1303,35 @@ TESTS = [
     test_reverse_tools_handles_missing_readelf_and_objdump_gracefully,
     test_static_detail_fake_objdump_output_is_capped,
     test_static_detail_classifies_imports_and_anchors,
+    test_reverse_decision_success_failure_strings_trigger_follow_string_references,
+    test_reverse_decision_compare_imports_trigger_string_reference_analysis,
+    test_reverse_decision_stripped_and_missing_symtab_trigger_disassembly_summary,
+    test_reverse_decision_no_matching_rules_returns_empty_result,
+    test_reverse_decision_refines_from_compare_import_facts,
+    test_reverse_decision_refines_from_input_import_facts,
+    test_reverse_decision_refines_from_rodata_ascii_hints,
+    test_reverse_decision_refines_from_missing_symtab,
+    test_follow_string_references_returns_anchors_for_fake_elf,
+    test_follow_string_references_missing_objdump_and_readelf_degrades_cleanly,
+    test_extract_check_path_finds_compare_call,
+    test_extract_check_path_infers_compare_call_without_symbol_facts,
+    test_extract_check_path_keeps_helper_window_before_compare,
+    test_extract_check_path_finds_branch_window,
+    test_extract_check_path_includes_rodata_hints,
+    test_extract_check_path_missing_symbols_degrades_cleanly,
+    test_extract_check_path_does_not_execute_or_read_artifact,
+    test_reverse_tool_missing_degrades_cleanly,
+    test_reverse_tool_runner_uses_no_shell,
+    test_reverse_tool_never_executes_artifact_directly,
+    test_reverse_tool_output_is_capped,
+    test_reverse_tool_result_extracts_summary_lines,
+    test_reverse_tool_result_extracts_structured_facts,
+    test_reverse_tool_formatter_includes_summary_block,
+    test_reverse_action_mapping_for_follow_string_references,
     test_biobrain_adapter_emits_reverse_preanalysis_trace,
     test_reverse_tools_do_not_execute_artifact,
+    test_reverse_registry_tools_do_not_execute_artifact,
+    test_biobrain_prompt_contains_reverse_decision_result,
 ]
 
 if __name__ == "__main__":

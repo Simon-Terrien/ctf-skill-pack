@@ -208,6 +208,57 @@ def summarize_trace_event(ev: TraceEvent) -> str:
         reasons = payload.get("reasons", [])
         if reasons:
             bits.append(f"reasons={','.join(reasons)}")
+    elif ev.kind in {"reverse_next_action", "reverse_decision_refined"}:
+        actions = payload.get("next_actions", []) or []
+        techniques = payload.get("inferred_techniques", []) or []
+        if actions:
+            bits.append(f"actions={','.join(actions)}")
+        if techniques:
+            bits.append(f"techniques={','.join(techniques)}")
+        if "confidence" in payload:
+            bits.append(f"confidence={payload.get('confidence')}")
+    elif ev.kind == "reverse_tool_result":
+        bits.append(f"tool={payload.get('tool', '?')}")
+        if "exit_code" in payload:
+            bits.append(f"exit={payload.get('exit_code')}")
+        facts = payload.get("facts", {}) or {}
+        if isinstance(facts, dict):
+            compare = facts.get("compare_imports", []) or []
+            inputs = facts.get("input_imports", []) or []
+            labels = facts.get("function_labels", []) or []
+            if compare:
+                bits.append(f"compare={len(compare)}")
+            if inputs:
+                bits.append(f"input={len(inputs)}")
+            if labels:
+                bits.append(f"labels={len(labels)}")
+        if "summary_line_count" in payload:
+            bits.append(f"summary={payload.get('summary_line_count')}")
+    elif ev.kind == "reverse_check_path":
+        compare = payload.get("compare_symbols", []) or []
+        inputs = payload.get("input_symbols", []) or []
+        calls = payload.get("candidate_calls", []) or []
+        branches = payload.get("candidate_branches", []) or []
+        if compare:
+            bits.append(f"compare={len(compare)}")
+        if inputs:
+            bits.append(f"input={len(inputs)}")
+        bits.append(f"calls={len(calls)}")
+        bits.append(f"branches={len(branches)}")
+        if "confidence" in payload:
+            bits.append(f"confidence={payload.get('confidence')}")
+        if payload.get("error"):
+            bits.append(f"error={payload.get('error')}")
+    elif ev.kind == "engine_no_candidate":
+        reasoning = payload.get("reasoning", []) or []
+        evidence = payload.get("evidence", []) or []
+        technique = payload.get("technique", []) or []
+        if technique:
+            bits.append(f"technique={','.join(technique)}")
+        if reasoning:
+            bits.append(f"reasoning={'; '.join(str(x) for x in reasoning[:2])}")
+        if evidence:
+            bits.append(f"evidence={'; '.join(str(x) for x in evidence[:2])}")
     return " ".join(bits)
 
 

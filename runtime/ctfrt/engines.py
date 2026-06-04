@@ -28,6 +28,20 @@ from .reverse_tools import (
     format_reverse_summary,
     format_static_detail,
 )
+from .reverse_decision import (
+    build_fact_bundle,
+    evaluate_reverse_decision,
+    format_reverse_decision,
+    format_reverse_fact_bundle,
+    refine_reverse_decision,
+)
+from .reverse_check_path import extract_check_path, format_check_path_summary
+from .reverse_tool_registry import (
+    ReverseToolResult,
+    format_reverse_tool_result,
+    run_reverse_tool,
+    select_tools_for_next_actions,
+)
 from .workspace import resolve_artifact_path
 
 # technique vocabulary shared with cms_cag for consistent tagging/surfacing
@@ -138,6 +152,22 @@ def _reverse_static_detail(
         details.append(detail)
         blocks.append(format_static_detail(detail))
     return details, "\n\n".join(blocks)
+
+
+def _reverse_tool_evidence(
+    resolved_artifacts: list[str],
+    next_actions: list[str],
+) -> tuple[list[ReverseToolResult], str]:
+    tool_names = select_tools_for_next_actions(next_actions)
+    results: list[ReverseToolResult] = []
+    blocks: list[str] = []
+    for resolved in resolved_artifacts:
+        path = Path(resolved)
+        for tool_name in tool_names:
+            result = run_reverse_tool(path, tool_name)
+            results.append(result)
+            blocks.append(format_reverse_tool_result(result))
+    return results, "\n\n".join(blocks)
 
 
 def _solve_xor_artifact(task: Task) -> EngineResult | None:
@@ -295,6 +325,10 @@ class BioBrainAdapter:
         resolved_artifacts: list[str],
         reverse_summary: str | None = None,
         static_detail_summary: str | None = None,
+        decision_summary: str | None = None,
+        tool_summary: str | None = None,
+        refined_decision_summary: str | None = None,
+        check_path_summary: str | None = None,
     ) -> str:
         arts = ", ".join(task.artifacts)
         resolved = ", ".join(resolved_artifacts) if resolved_artifacts else "(unresolved)"
@@ -304,6 +338,14 @@ class BioBrainAdapter:
             _, context = _resolved_artifact_context(task)
         if static_detail_summary:
             context = f"{context}\n\nStatic detail:\n{static_detail_summary}"
+        if decision_summary:
+            context = f"{context}\n\n{decision_summary}"
+        if tool_summary:
+            context = f"{context}\n\nReverse tool outputs:\n{tool_summary}"
+        if refined_decision_summary:
+            context = f"{context}\n\n{refined_decision_summary}"
+        if check_path_summary:
+            context = f"{context}\n\nCheck-path summary:\n{check_path_summary}"
         return (
             f"CTF {self.category.value} task. Artifacts: {arts}. Resolved paths: {resolved}."
             f"{fmt} Recover the flag. Use only sandboxed tools. "
@@ -330,7 +372,14 @@ class BioBrainAdapter:
             })
 
         static_detail_text = None
+        decision_summary = None
+        tool_summary_text = None
+        refined_decision_summary = None
+        check_path_summary = None
         if self.category == Category.reverse:
+            decision = evaluate_reverse_decision(summaries)
+            decision_summary = format_reverse_decision(decision)
+            await self._emit("reverse_next_action", decision.model_dump())
             static_details, static_detail_text = _reverse_static_detail(task, resolved_artifacts, summaries)
             for detail in static_details:
                 await self._emit("reverse_static_detail", {
@@ -341,12 +390,44 @@ class BioBrainAdapter:
                     "compare_import_count": len(detail.imported_compare_symbols),
                     "input_import_count": len(detail.imported_input_symbols),
                 })
+            tool_results, tool_summary_text = _reverse_tool_evidence(resolved_artifacts, decision.next_actions)
+            for tool_result in tool_results:
+                await self._emit("reverse_tool_result", {
+                    "tool": tool_result.name,
+                    "path": tool_result.path,
+                    "command": tool_result.command,
+                    "exit_code": tool_result.exit_code,
+                    "summary_line_count": len(tool_result.summary_lines),
+                    "facts": tool_result.facts,
+                    "truncated": tool_result.truncated,
+                    "timed_out": tool_result.timed_out,
+                    "tool_missing": tool_result.tool_missing,
+                    "error": tool_result.error,
+                })
+            fact_bundle = build_fact_bundle(tool_results)
+            refined_decision = refine_reverse_decision(decision, fact_bundle)
+            refined_decision_summary = (
+                format_reverse_fact_bundle(fact_bundle)
+                + "\n\n"
+                + "Refined reverse decision:\n"
+                + "\n".join(format_reverse_decision(refined_decision).splitlines()[1:])
+            )
+            await self._emit("reverse_decision_refined", refined_decision.model_dump())
+            if any(action in {"input_path_analysis", "string_reference_analysis", "follow_string_references", "disassembly_summary"} for action in refined_decision.next_actions):
+                for resolved in resolved_artifacts:
+                    check_path = extract_check_path(Path(resolved), tool_results)
+                    check_path_summary = format_check_path_summary(check_path)
+                    await self._emit("reverse_check_path", check_path.model_dump())
 
         content = self._build_content(
             task,
             resolved_artifacts=resolved_artifacts,
             reverse_summary=reverse_summary if self.category == Category.reverse else None,
             static_detail_summary=static_detail_text if self.category == Category.reverse else None,
+            decision_summary=decision_summary if self.category == Category.reverse else None,
+            tool_summary=tool_summary_text if self.category == Category.reverse else None,
+            refined_decision_summary=refined_decision_summary if self.category == Category.reverse else None,
+            check_path_summary=check_path_summary if self.category == Category.reverse else None,
         )
         try:
             trace = await self._run_pipeline(task, content, resolved_artifacts)

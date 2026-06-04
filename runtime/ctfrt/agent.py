@@ -153,7 +153,11 @@ class SpecialistAgent:
 
         if not result.candidate:
             await self._trace(task.challenge_id, "engine_no_candidate",
-                              {"reasoning": result.reasoning})
+                              {
+                                  "reasoning": result.reasoning,
+                                  "evidence": result.evidence,
+                                  "technique": result.technique,
+                              })
             return
 
         # Map engine result -> ctfrt Candidate. The engine's honest `reproduced`
