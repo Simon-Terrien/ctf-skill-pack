@@ -1,0 +1,9 @@
+reverse: techniques/reverse.md
+crypto: techniques/crypto.md
+stego: techniques/stego.md
+forensics: techniques/forensics.md
+web: techniques/web.md
+pwn: techniques/pwn.md
+jail: techniques/jail.md
+osint: techniques/osint.md
+misc: techniques/misc.md

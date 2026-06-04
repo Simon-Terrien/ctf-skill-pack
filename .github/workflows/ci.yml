@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: UV_CACHE_DIR=/tmp/uv-cache uv sync
+
+      - name: Compile check
+        run: UV_CACHE_DIR=/tmp/uv-cache uv run python -m compileall -q runtime/ctfrt runtime/tests
+
+      - name: Run tests
+        run: UV_CACHE_DIR=/tmp/uv-cache uv run pytest runtime/tests/ -q --tb=short
