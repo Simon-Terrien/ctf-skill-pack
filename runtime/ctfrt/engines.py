@@ -12,9 +12,11 @@ it reports what it recovered and whether it independently reproduced it.
 from __future__ import annotations
 
 import asyncio
-import re
 import os
+import re
+import threading
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional, Protocol, runtime_checkable
 
 from .contracts import Category, Task
@@ -32,6 +34,37 @@ _TECHNIQUE_VOCAB = [
 def _extract_techniques(text: str) -> list[str]:
     low = text.lower()
     return [t for t in _TECHNIQUE_VOCAB if t in low]
+
+
+def _solve_xor_artifact(task: Task) -> EngineResult | None:
+    import json
+
+    for art in task.artifacts:
+        try:
+            spec = json.loads(Path(art).read_text())
+        except (OSError, ValueError):
+            continue
+        if spec.get("type") not in (None, "xor-crackme"):
+            continue
+        if "xor_key" not in spec or "blob_hex" not in spec:
+            continue
+        key = spec["xor_key"]
+        blob = bytes.fromhex(spec["blob_hex"])
+        flag = bytes(b ^ key for b in blob).decode("latin-1")
+        reproduced = bytes(ord(c) ^ key for c in flag).hex() == spec["blob_hex"]
+        return EngineResult(
+            candidate=flag,
+            evidence=[f"artifact={art}",
+                      f"recovered via single-byte XOR key=0x{key:02x}",
+                      "reproduction=re-encode(flag,key)==stored blob"],
+            reproduced=reproduced,
+            reproduction={"method": "reencode_xor", "artifact": art},
+            technique=["xor", "keygen-inversion"],
+            reasoning=["artifact-first solve matched xor_key/blob_hex schema",
+                       "identified single-byte XOR transform",
+                       "inverted transform to recover flag"],
+        )
+    return None
 
 
 @dataclass(slots=True)
@@ -79,11 +112,57 @@ class BioBrainAdapter:
         self._memory = memory_query
         self._pipeline = None  # built on first use
 
+    def _pipeline_kwargs(self) -> dict[str, str | None]:
+        return {
+            "palace_path": os.path.expanduser(
+                os.getenv("BIOBRAIN_PALACE_PATH", "~/.mempalace/palace")
+            ),
+            "kg_path": os.getenv("BIOBRAIN_KG_PATH") or None,
+            "playbook_dir": os.getenv("BIOBRAIN_PLAYBOOK_DIR") or None,
+            "identity_config": self._identity_config
+            or os.getenv("BIOBRAIN_IDENTITY_CONFIG")
+            or None,
+            "mempalace_identity": os.getenv("BIOBRAIN_MEMPALACE_IDENTITY") or None,
+        }
+
+    def _timeout_s(self) -> float:
+        raw = os.getenv("CTF_AGENT_ENGINE_TIMEOUT_S", "4").strip()
+        try:
+            return max(0.1, float(raw))
+        except ValueError:
+            return 4.0
+
     def _ensure_pipeline(self):
         if self._pipeline is None:
             from biobrain.runtime.pipeline import BioBrain  # lazy
-            self._pipeline = BioBrain(identity_config=self._identity_config)
+            self._pipeline = BioBrain(**self._pipeline_kwargs())
         return self._pipeline
+
+    async def _run_pipeline(self, task: Task, content: str):
+        from biobrain.core.enums import InputSource  # lazy
+
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+
+        def worker():
+            try:
+                trace = self._ensure_pipeline().process(
+                    content, InputSource.USER,
+                    {"session_id": task.challenge_id, "artifacts": task.artifacts},
+                )
+            except Exception as exc:
+                if not fut.done():
+                    loop.call_soon_threadsafe(fut.set_exception, exc)
+            else:
+                if not fut.done():
+                    loop.call_soon_threadsafe(fut.set_result, trace)
+
+        threading.Thread(
+            target=worker,
+            name=f"biobrain-{task.challenge_id}",
+            daemon=True,
+        ).start()
+        return await asyncio.wait_for(fut, timeout=self._timeout_s())
 
     def _build_content(self, task: Task) -> str:
         arts = ", ".join(task.artifacts)
@@ -95,14 +174,18 @@ class BioBrainAdapter:
         )
 
     async def solve(self, task: Task) -> EngineResult:
-        from biobrain.core.enums import InputSource  # lazy
-        pipeline = self._ensure_pipeline()
-        content = self._build_content(task)
+        local = _solve_xor_artifact(task)
+        if local is not None:
+            return local
 
-        trace = await asyncio.to_thread(
-            pipeline.process, content, InputSource.USER,
-            {"session_id": task.challenge_id, "artifacts": task.artifacts},
-        )
+        content = self._build_content(task)
+        try:
+            trace = await self._run_pipeline(task, content)
+        except asyncio.TimeoutError:
+            return EngineResult(
+                evidence=[f"BioBrain pipeline timed out after {self._timeout_s():g}s"],
+                reasoning=[f"timeout:{self._timeout_s():g}s"],
+            )
 
         # reflex/executive halted the cycle -> nothing recovered
         if getattr(trace, "halted_at", None):
@@ -165,30 +248,7 @@ class StubReverseEngine:
     category = Category.reverse
 
     async def solve(self, task: Task) -> EngineResult:
-        import json
-        from pathlib import Path
-        for art in task.artifacts:
-            try:
-                spec = json.loads(Path(art).read_text())
-            except (OSError, ValueError):
-                continue
-            if "xor_key" not in spec or "blob_hex" not in spec:
-                continue
-            key = spec["xor_key"]
-            blob = bytes.fromhex(spec["blob_hex"])
-            flag = bytes(b ^ key for b in blob).decode("latin-1")
-            # reproduce: re-encode and confirm it matches the stored blob
-            reproduced = bytes(ord(c) ^ key for c in flag).hex() == spec["blob_hex"]
-            return EngineResult(
-                candidate=flag,
-                evidence=[f"artifact={art}",
-                          f"recovered via single-byte XOR key=0x{key:02x}",
-                          "reproduction=re-encode(flag,key)==stored blob"],
-                reproduced=reproduced,
-                reproduction={"method": "reencode_xor", "artifact": art},
-                technique=["xor", "keygen-inversion"],
-                reasoning=["static scan found no plaintext flag",
-                           "identified single-byte XOR transform",
-                           "inverted transform to recover flag"],
-            )
+        result = _solve_xor_artifact(task)
+        if result is not None:
+            return result
         return EngineResult(reasoning=["no recognizable transform in artifacts"])

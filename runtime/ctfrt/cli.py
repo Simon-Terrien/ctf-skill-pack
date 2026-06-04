@@ -15,7 +15,7 @@ from .gate import Gate
 from .engines import engine_for_category
 from .memory import InMemoryWorkingMemory, make_working_memory
 from .orchestrator import Orchestrator
-from .trace_recorder import TraceRecorder, iter_trace_events, summarize_trace_event, trace_path_for
+from .trace_recorder import iter_trace_events, summarize_trace_event, trace_path_for
 from .tools import Researcher
 
 
@@ -56,10 +56,19 @@ async def solve_local(args) -> None:
     trace_dir.mkdir(parents=True, exist_ok=True)
     await bus.start()
 
+    async def local_trace_recorder() -> None:
+        async for raw in bus.subscribe(Topics.TRACES, group="cli-trace-recorder"):
+            ev = TraceEvent.model_validate(raw)
+            path = trace_path_for(trace_dir, ev.challenge_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(ev.model_dump_json())
+                fh.write("\n")
+
     # Start core loops in one process. Only the routed specialist is needed.
     cat = _category(args.category) or Category.misc
     loops = [
-        asyncio.create_task(TraceRecorder(bus, trace_dir=trace_dir).run()),
+        asyncio.create_task(local_trace_recorder()),
         asyncio.create_task(Orchestrator(bus, mem).run()),
         asyncio.create_task(Gate(bus, mem).run()),
         asyncio.create_task(SpecialistAgent(cat, bus, mem, None, researcher,
@@ -80,6 +89,7 @@ async def solve_local(args) -> None:
     trace_sub = bus.subscribe(Topics.TRACES, group="cli-solve-local-traces")
     flag_task = asyncio.create_task(flag_sub.__anext__())
     trace_task = asyncio.create_task(trace_sub.__anext__())
+    await asyncio.sleep(0.05)
     await bus.publish(Topics.CHALLENGES, ch, key=ch.id)
     try:
         async with asyncio.timeout(args.timeout):
@@ -116,12 +126,17 @@ async def solve_local(args) -> None:
                         print(f"not solved: {ev.kind} {detail}".rstrip())
                         return
                     trace_task = asyncio.create_task(trace_sub.__anext__())
+    except TimeoutError:
+        print(f"not solved: timeout after {args.timeout:g}s")
+        raise SystemExit(1)
     finally:
         flag_task.cancel()
         trace_task.cancel()
         for task in loops:
             task.cancel()
         await asyncio.gather(flag_task, trace_task, *loops, return_exceptions=True)
+        await flag_sub.aclose()
+        await trace_sub.aclose()
         await mem.close()
         await bus.stop()
 

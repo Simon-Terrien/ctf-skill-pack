@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import asyncio
 import contextlib
 import json
@@ -16,6 +15,7 @@ from ctfrt.gate import Gate
 from ctfrt.memory import InMemoryWorkingMemory
 from ctfrt.orchestrator import Orchestrator
 from ctfrt.sandbox import run_sandboxed
+from ctfrt.trace_recorder import iter_trace_events
 from ctfrt.tools import Researcher
 
 
@@ -372,85 +372,98 @@ async def test_runtime_optional_memory_component_starts_when_cms_available(tmp_p
             os.environ["CTF_CMS_DB"] = old_db
 
 
-def test_cli_solve_local_static_flag(tmp_path: Path):
+def _run_solve_local_subprocess(*, name: str, artifact: Path, flag_format: str,
+                                timeout: float, trace_dir: Path | None = None,
+                                engine: str | None = None):
+    env = os.environ.copy()
+    env["PYTHONPATH"] = "runtime"
+    if engine is None:
+        env.pop("CTF_AGENT_ENGINE", None)
+    else:
+        env["CTF_AGENT_ENGINE"] = engine
+    if trace_dir is not None:
+        env["CTF_TRACE_DIR"] = str(trace_dir)
+    else:
+        env.pop("CTF_TRACE_DIR", None)
+    return subprocess.run([
+        sys.executable, "-m", "ctfrt.cli", "solve-local",
+        "--name", name,
+        "--category", "misc",
+        "--artifact", str(artifact),
+        "--flag-format", flag_format,
+        "--timeout", str(timeout),
+    ], text=True, capture_output=True, timeout=10, env=env)
+
+
+def test_cli_solve_local_subprocess_exits_cleanly(tmp_path: Path):
     artifact = tmp_path / "note.txt"
     artifact.write_text("noise CTF{cli_static_win} end")
-    cmd = [
-        sys.executable, "-m", "ctfrt.cli", "solve-local",
-        "--name", "cli", "--category", "misc",
-        "--artifact", str(artifact), "--flag-format", r"CTF\{[^}]+\}",
-    ]
-    out = subprocess.check_output(cmd, text=True).strip()
-    assert out == "CTF{cli_static_win}"
+    result = _run_solve_local_subprocess(
+        name="cli-static-exit",
+        artifact=artifact,
+        flag_format=r"CTF\{[^}]+\}",
+        timeout=5,
+    )
+    assert result.returncode == 0
+    assert "CTF{cli_static_win}" in result.stdout
 
 
-async def test_cli_solve_local_uses_configured_engine(tmp_path: Path):
-    from argparse import Namespace
+def test_cli_solve_local_persists_trace(tmp_path: Path):
+    artifact = tmp_path / "note.txt"
+    artifact.write_text("noise CTF{cli_static_win} end")
+    trace_dir = tmp_path / "traces"
+    result = _run_solve_local_subprocess(
+        name="cli-static-exit",
+        artifact=artifact,
+        flag_format=r"CTF\{[^}]+\}",
+        timeout=5,
+        trace_dir=trace_dir,
+    )
+    assert result.returncode == 0
+    trace_path = trace_dir / "cli-static-exit.jsonl"
+    assert trace_path.exists()
+    kinds = [ev.kind for ev in iter_trace_events(trace_dir, "cli-static-exit")]
+    for kind in ("routed", "task_started", "candidate_emitted", "candidate_accepted", "solved"):
+        assert kind in kinds
 
-    import ctfrt.engines as runtime_engines
-    from ctfrt import cli as runtime_cli
-    from ctfrt.contracts import Category
-    from ctfrt.engines import EngineResult
 
+def test_cli_solve_local_unsolved_exits_without_hanging(tmp_path: Path):
+    artifact = tmp_path / "no_flag.txt"
+    artifact.write_text("noise only")
+    result = _run_solve_local_subprocess(
+        name="cli-unsolved",
+        artifact=artifact,
+        flag_format=r"CTF\{[^}]+\}",
+        timeout=2,
+    )
+    assert result.returncode != 0
+    combined = f"{result.stdout}\n{result.stderr}".lower()
+    assert "timeout" in combined
+
+
+def test_cli_solve_local_biobrain_solves_xor_artifact_first(tmp_path: Path):
     artifact = tmp_path / "xor_crackme.json"
     artifact.write_text(json.dumps({
+        "type": "xor-crackme",
         "xor_key": 90,
         "blob_hex": bytes(ord(c) ^ 90 for c in "CTF{xor_reversed}").hex(),
     }))
-
-    class FakeBioBrainAdapter:
-        def __init__(self, category, *args, **kwargs):
-            self.category = category
-
-        async def solve(self, task):
-            return EngineResult(
-                candidate="CTF{xor_reversed}",
-                evidence=[f"artifact={task.artifacts[0]}", "stub engine"],
-                reproduced=True,
-                reproduction={"method": "reencode_xor", "artifact": task.artifacts[0]},
-                technique=["xor"],
-                reasoning=["stub engine"],
-            )
-
-    old_adapter = runtime_engines.BioBrainAdapter
-    old_engine = os.environ.get("CTF_AGENT_ENGINE")
-    old_trace_dir = os.environ.get("CTF_TRACE_DIR")
     trace_dir = tmp_path / "traces"
-    try:
-        runtime_engines.BioBrainAdapter = FakeBioBrainAdapter
-        os.environ["CTF_AGENT_ENGINE"] = "biobrain"
-        os.environ["CTF_TRACE_DIR"] = str(trace_dir)
-
-        args = Namespace(
-            name="xor",
-            category=Category.reverse.value,
-            artifact=[str(artifact)],
-            flag_format=r"CTF\{[^}]+\}",
-            remote=None,
-            description="",
-            timeout=2.0,
-        )
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            await runtime_cli.solve_local(args)
-
-        assert buf.getvalue().strip() == "CTF{xor_reversed}"
-        events = iter_trace_events(trace_dir, "xor")
-        kinds = [ev.kind for ev in events]
-        assert "engine_dispatch" in kinds
-        assert "needs_engine" not in kinds
-        assert "candidate_emitted" in kinds
-        assert "gate_verdict" in kinds or "candidate_accepted" in kinds
-    finally:
-        runtime_engines.BioBrainAdapter = old_adapter
-        if old_engine is None:
-            os.environ.pop("CTF_AGENT_ENGINE", None)
-        else:
-            os.environ["CTF_AGENT_ENGINE"] = old_engine
-        if old_trace_dir is None:
-            os.environ.pop("CTF_TRACE_DIR", None)
-        else:
-            os.environ["CTF_TRACE_DIR"] = old_trace_dir
+    result = _run_solve_local_subprocess(
+        name="xor-test",
+        artifact=artifact,
+        flag_format=r"CTF\{[^}]+\}",
+        timeout=5,
+        trace_dir=trace_dir,
+        engine="biobrain",
+    )
+    assert result.returncode == 0
+    assert "CTF{xor_reversed}" in result.stdout
+    kinds = [ev.kind for ev in iter_trace_events(trace_dir, "xor-test")]
+    for kind in ("engine_dispatch", "candidate_emitted", "candidate_accepted", "solved"):
+        assert kind in kinds
+    solved = next(ev for ev in iter_trace_events(trace_dir, "xor-test") if ev.kind == "solved")
+    assert solved.payload["technique"] == ["xor", "keygen-inversion"]
 
 
 TESTS = [
@@ -473,8 +486,10 @@ TESTS = [
     test_trace_cli_show_and_export,
     test_runtime_optional_components_do_not_require_cms_by_default,
     test_runtime_optional_memory_component_starts_when_cms_available,
-    test_cli_solve_local_static_flag,
-    test_cli_solve_local_uses_configured_engine,
+    test_cli_solve_local_subprocess_exits_cleanly,
+    test_cli_solve_local_persists_trace,
+    test_cli_solve_local_unsolved_exits_without_hanging,
+    test_cli_solve_local_biobrain_solves_xor_artifact_first,
 ]
 
 
