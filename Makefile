@@ -11,7 +11,7 @@ LLM_TEXT ?= noise CTF{llm_static_test} end
 LLM_FLAG_FORMAT ?= CTF\{[^}]+\}
 LLM_ARTIFACT ?=
 
-.PHONY: help venv sync test smoke compile clean solve-local submit trace-show trace-export llm-drive biobrain-run cms-bootstrap distributed-up distributed-down distributed-smoke inspect init-workdir validate-candidate
+.PHONY: help venv sync test smoke compile clean solve-local submit trace-show trace-export llm-drive biobrain-run cms-bootstrap distributed-up distributed-down distributed-smoke inspect init-workdir validate-candidate board
 
 help:
 	@printf '%s\n' \
@@ -42,9 +42,8 @@ venv:
 sync:
 	UV_CACHE_DIR=$(UV_CACHE_DIR) $(UV) sync
 
-test: smoke
-	UV_CACHE_DIR=$(UV_CACHE_DIR) $(UV) run python runtime/tests/test_engine_weld.py
-	UV_CACHE_DIR=$(UV_CACHE_DIR) $(UV) run python runtime/tests/test_cms_cag.py
+test: sync compile
+	UV_CACHE_DIR=$(UV_CACHE_DIR) $(UV) run pytest runtime/tests/ -q --tb=short
 
 smoke: sync
 	UV_CACHE_DIR=$(UV_CACHE_DIR) $(UV) run python runtime/tests/smoke_runtime.py

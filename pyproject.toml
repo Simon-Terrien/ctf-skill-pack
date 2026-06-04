@@ -26,3 +26,9 @@ package-dir = {"" = "runtime"}
 
 [tool.setuptools.packages.find]
 where = ["runtime"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
+]
