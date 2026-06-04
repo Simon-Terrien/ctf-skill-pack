@@ -63,6 +63,9 @@ inspect: sync
 validate-candidate: sync
 	UV_CACHE_DIR=$(UV_CACHE_DIR) $(UV) run python -m ctfrt.cli validate-candidate $(ARGS)
 
+board: sync
+	UV_CACHE_DIR=$(UV_CACHE_DIR) $(UV) run python -m ctfrt.cli board $(ARGS)
+
 submit: sync
 	UV_CACHE_DIR=$(UV_CACHE_DIR) $(UV) run python -m ctfrt.cli submit $(ARGS)
 

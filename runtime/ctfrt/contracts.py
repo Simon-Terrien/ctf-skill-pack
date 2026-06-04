@@ -147,6 +147,7 @@ class Handoff(BaseModel):
     target: Category
     reason: str
     carry: dict = Field(default_factory=dict)  # extracted params, etc.
+    handoff_depth: int = 0  # incremented on each re-route; enforces _MAX_HANDOFF_DEPTH
 
 
 class TraceEvent(BaseModel):

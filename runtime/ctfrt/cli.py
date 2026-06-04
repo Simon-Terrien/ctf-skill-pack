@@ -336,6 +336,65 @@ async def solve_local(args) -> None:
         log.info("solve-local shutdown complete", extra=kv(challenge_id=args.name))
 
 
+def board(args) -> None:
+    """Print a summary table of all challenges in the trace store."""
+    trace_dir = Path(getattr(args, "trace_dir", None) or os.getenv("CTF_TRACE_DIR", ".ctfrt/traces"))
+    if not trace_dir.is_dir():
+        if getattr(args, "json", False):
+            print(json.dumps({"challenges": []}))
+        else:
+            print("no trace directory found")
+        return
+
+    rows: list[dict] = []
+    for trace_file in sorted(trace_dir.glob("*.jsonl")):
+        challenge_id = trace_file.stem
+        status = "unknown"
+        category = ""
+        technique: list[str] = []
+        first_ts: float | None = None
+        last_ts: float | None = None
+
+        for ev in iter_trace_events(trace_dir, challenge_id):
+            if first_ts is None:
+                first_ts = ev.ts
+            last_ts = ev.ts
+            if ev.kind == "routed":
+                category = ev.payload.get("category", "")
+            if ev.kind == "solved":
+                status = "solved"
+                technique = ev.payload.get("technique", [])
+            elif status == "unknown" and ev.kind == "engine_no_candidate":
+                status = "no_candidate"
+            elif status == "unknown" and ev.kind == "needs_engine":
+                status = "needs_engine"
+
+        elapsed = round(last_ts - first_ts, 1) if first_ts and last_ts else 0.0
+        rows.append({
+            "id": challenge_id,
+            "status": status,
+            "category": category,
+            "elapsed_s": elapsed,
+            "technique": ", ".join(technique) if technique else "-",
+        })
+
+    if getattr(args, "json", False):
+        print(json.dumps({"challenges": rows}))
+        return
+
+    if not rows:
+        print("no challenges in trace store")
+        return
+
+    col_w = {"id": 32, "status": 14, "category": 14, "elapsed_s": 10, "technique": 28}
+    header = "  ".join(k.upper().ljust(col_w[k]) for k in col_w)
+    print(header)
+    print("-" * len(header))
+    for r in rows:
+        line = "  ".join(str(r[k]).ljust(col_w[k]) for k in col_w)
+        print(line)
+
+
 def _trace_dir(args) -> Path:
     return Path(args.trace_dir or os.getenv("CTF_TRACE_DIR", ".ctfrt/traces"))
 
@@ -488,6 +547,11 @@ def main() -> None:
     p.add_argument("--timeout", type=float, default=5.0)
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=solve_local)
+
+    p = sub.add_parser("board")
+    p.add_argument("--trace-dir")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=board)
 
     p = sub.add_parser("show-trace")
     p.add_argument("--challenge-id", required=True)

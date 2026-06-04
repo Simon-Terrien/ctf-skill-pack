@@ -72,6 +72,8 @@ def _classify_artifact(challenge_id: str, workdir: str, artifact: str) -> str:
     return "unknown"
 
 
+_MAX_HANDOFF_DEPTH = 3
+
 log = get_logger(__name__)
 
 
@@ -148,12 +150,24 @@ class Orchestrator:
         sig = f"{h.from_category.value}->{h.target.value}:{h.reason}"
         if await self.mem.is_rejected(h.challenge_id, sig):
             return
+        if h.handoff_depth >= _MAX_HANDOFF_DEPTH:
+            log.warning("handoff depth exceeded", extra=kv(
+                challenge_id=h.challenge_id, depth=h.handoff_depth, target=h.target.value))
+            await self.bus.publish(Topics.TRACES, TraceEvent(
+                challenge_id=h.challenge_id,
+                kind="handoff_depth_exceeded",
+                payload={"depth": h.handoff_depth, "target": h.target.value,
+                         "from": h.from_category.value, "reason": h.reason},
+            ))
+            return
         await self.bus.publish(Topics.tasks_for(h.target), Task(
             challenge_id=h.challenge_id, workdir=board.get("workdir", ""), category=h.target,
-            artifacts=board.get("artifacts", []), triage={"carry": h.carry}),
+            artifacts=board.get("artifacts", []),
+            triage={"carry": h.carry, "handoff_depth": h.handoff_depth + 1}),
             key=h.target.value)
         log.info("handoff routed", extra=kv(
-            challenge_id=h.challenge_id, source=h.from_category.value, target=h.target.value))
+            challenge_id=h.challenge_id, source=h.from_category.value,
+            target=h.target.value, depth=h.handoff_depth))
         log.debug("publish topic", extra=kv(
             topic=Topics.tasks_for(h.target), challenge_id=h.challenge_id, category=h.target.value))
 
