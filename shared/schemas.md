@@ -102,3 +102,155 @@ Specialist tasks are routed to category-specific topics using
 `Topics.tasks_for(category)`, e.g. `ctf.tasks.reverse` and
 `ctf.tasks.crypto-attack`. The shared `ctf.tasks` name is legacy only.
 
+---
+
+## Task schema
+
+```yaml
+task:
+  id:              # unique hex ID (auto-generated)
+  challenge_id:    # parent challenge
+  workdir:         # workspace-relative path
+  category:        # reverse | crypto-attack | web-exploit | binary-pwn |
+                   # forensics | stego | jail-escape | osint | misc
+  artifacts: []    # relative paths under workspace
+  flag_format:     # regex or null
+  triage:          # dict: type, artifact_types, lessons (from ltm), carry (from handoff), handoff_depth
+  sandbox_profile: # default
+  created_at:      # unix timestamp
+```
+
+---
+
+## Handoff schema
+
+When a specialist reclassifies a challenge it publishes a `Handoff`:
+
+```yaml
+handoff:
+  challenge_id:    # which challenge
+  from_category:   # source specialist category
+  target:          # destination category
+  reason:          # why reclassified (short string)
+  handoff_depth:   # re-route counter; orchestrator rejects at _MAX_HANDOFF_DEPTH=3
+  carry:           # dict forwarded to receiving specialist:
+    evidence: []             # up to 5 evidence strings from prior steps
+    techniques: []           # technique tags accumulated so far
+    open_hypothesis_ids: []  # IDs of hypotheses not yet killed
+```
+
+---
+
+## ToolAction and ToolCallRecord
+
+Each engine step emits a `ToolCallRecord` trace event so tool invocations are
+visible in the append-only audit trail.
+
+```yaml
+tool_call_record:
+  id:              # unique hex ID
+  challenge_id:    # which challenge
+  tool:            # one of (ToolAction):
+                   #   strings, file, xxd, entropy, archive_list
+                   #   objdump_disassembly, objdump_rodata
+                   #   readelf_header, readelf_sections, readelf_symbols
+                   #   checksec, frequency_analysis
+                   #   xor_brute, caesar_brute, base64_decode
+                   #   pcap_summary, extract_strings
+  artifact:        # artifact path
+  result_summary:  # short description of what was found or empty
+  exit_code:       # tool exit code or null
+  duration_ms:     # wall-clock time of the tool call
+  error:           # error message or null
+  ts:              # unix timestamp
+```
+
+---
+
+## TraceEvent kinds
+
+All components publish to `ctf.traces`. The complete set of `kind` values:
+
+**Lifecycle:**
+`routed`, `task_started`, `needs_engine`, `engine_dispatch`, `engine_error`,
+`engine_no_candidate`, `challenge_rejected`
+
+**Candidates:**
+`candidate_emitted`, `candidate_accepted`, `candidate_rejected`, `gate_verdict`
+
+**Resolution:**
+`solved`
+
+**Reverse analysis:**
+`reverse_preanalysis`, `reverse_next_action`, `reverse_static_detail`,
+`reverse_tool_result`, `reverse_decision_refined`, `reverse_check_path`,
+`reverse_transform_path`, `reverse_deterministic_candidate`
+
+**Sandbox:**
+`sandbox_request`, `sandbox_result`, `sandbox_timeout`, `sandbox_denied`
+
+**Handoff:**
+`handoff`, `handoff_depth_exceeded`
+
+**Tool / memory / intelligence:**
+`tool_call_record`, `tool_call_started`, `tool_call_finished`, `tool_call_failed`,
+`intelligence_advisory`
+
+---
+
+## Intelligence service contracts
+
+Advisory services provide evidence-backed recommendations to specialists. They
+have no execution authority and no Gate bypass.
+
+```yaml
+intelligence_question:
+  mission_id:      # challenge_id
+  requester:       # e.g. "reverse-specialist"
+  question:        # natural language question
+  context_refs: [] # optional related source IDs
+  source_scope:    # internal | external | both
+  max_results:     # 1–20
+
+intelligence_answer:
+  answer:          # natural language answer or "No match"
+  confidence:      # [0.0, 1.0]
+  evidence:        # list of EvidenceRef
+    - source_id:   # file path or URL
+      source_type: # internal_corpus | external_source | trace | writeup | notes | docs | other
+      title:        # optional label
+      summary:      # excerpt ≤200 chars
+      confidence:   # [0.0, 1.0]
+      url:          # optional
+  recommended_next_action: # one-line suggestion or null
+  warnings: []     # degradation notices (e.g. "agentic_rag: no corpus match")
+```
+
+Environment-controlled adapters:
+- `CTF_INTELLIGENCE_INTERNAL=agentic_rag` → `AgenticRagService` (local corpus keyword RAG)
+- `CTF_INTELLIGENCE_EXTERNAL=enhanced_deep_search` → `EnhancedDeepSearchService` (DeepSearcher)
+- Default → `NullIntelligenceService`
+
+---
+
+## Board state
+
+The Orchestrator tracks per-challenge board state in working memory:
+
+```yaml
+board:
+  name:            # challenge name
+  board_status:    # running | solved | timed_out | failed
+  status:          # legacy field: in_progress | solved
+  primary:         # routed category value
+  workdir:         # workspace-relative path
+  artifacts: []    # registered artifact names
+  flags: []        # accepted flag values (populated on solve)
+  started_at:      # unix timestamp of on_challenge()
+```
+
+`board_status` transitions:
+- `running` → `solved` (on_flag with status=solved)
+- `running` → `timed_out` (on_trace with kind=engine_no_candidate)
+- `running` → `failed` (on_trace with kind=engine_error)
+

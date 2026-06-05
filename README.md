@@ -1,89 +1,141 @@
-# CTF Skill Pack (Phantom-style)
+# CTF Skill Pack
 
-A thin orchestration + verification layer over a vendored CTF technique corpus.
-The split is deliberate:
+A CTF agent framework with deterministic specialist engines, bounded reasoning loops, and an evidence-aware gate. Solves challenges locally (no external AI required for deterministic categories) and escalates to BioBrain for harder cases.
 
-- **Technique content** (decompiler patterns, packer signatures, anti-debug,
-  VM recovery, crypto recipes, web CVE chains) → forked from
-  `ljagiello/ctf-skills` and vendored as `ctf-reverse/`, `ctf-crypto/`, etc.
-  Do not rewrite this; it is broad and good.
-- **This layer** → the parts that corpus does not provide: orchestration,
-  routing, the hypothesis/evidence ledgers, the verification gate, the sandbox
-  gate, and the search-agent contracts.
-
-## MVP scope (what's here)
+## Repository layout
 
 ```
-ctf-skill-pack/
-  shared/schemas.md          # the contracts everything reads/writes
-  ctf-orchestrator/          # routing, board state, dedup, master flag ledger
-  researcher/                # fast single-pass lookup (shared service)
-  deepsearcher/              # iterative multi-hop investigation (expensive tier)
-  reverse/                   # local reverse doctrine: SKILL.md, references, YAML, later scripts
-  flag-discipline/           # verification gate — no solve without it
-  exploit-sandbox/           # isolation gate — no execution without it
+runtime/ctfrt/         — agent runtime (orchestrator, gate, specialist agents, engines)
+vendor/techniques/     — offline technique corpus (9 categories, When/Tools/Caveats)
+integrations/          — optional intelligence adapters (agentic_rag, enhanced_deep_search)
+{category}/SKILL.md   — per-category SOP + Reference Corpus link
+shared/schemas.md      — wire contracts (read this first)
+.github/workflows/     — GitHub Actions CI (Python 3.11/3.12)
 ```
 
-## Skill structure
+## Architecture
 
-Each skill is a directory anchored by `SKILL.md` and may also contain:
-
-- `scripts/` for executable helpers
-- `references/` for detailed operator or domain material
-- `assets/` for templates or static resources
-- local YAML or similar support files for machine-readable doctrine
-
-Current reverse skill structure is trending toward:
-
-```text
-reverse/
-├── SKILL.md
-├── REFERENCE.md
-├── TECHNIQUES.yaml
-├── DECISION_TREE.yaml
-└── scripts/              # add executable helpers here later
+```
+Challenge
+  │
+  ▼
+Orchestrator ── triage (magic bytes, LTM retrieve) ──► Task (per category)
+  │                                                        │
+  │                                                        ▼
+  │                                               SpecialistAgent
+  │                                                  │  │
+  │                                     static scan ◄┘  │ engine dispatch
+  │                                                      ▼ (bounded loop)
+  │                                                  Engine
+  │                                              (deterministic or BioBrain)
+  │                                                      │
+  │                                               Candidate
+  │                                                      │
+  └──────────────────────────────────────────────► Gate
+                                                         │
+                                                   solved / raw
 ```
 
-Do not forget `scripts/` when a skill grows beyond pure doctrine. Repetitive or
-machine-executable workflows belong there, not embedded inline in `SKILL.md`.
+### Key components
 
-## Build order
+| Component | Description |
+|-----------|-------------|
+| `Orchestrator` | Triage, routing, board state, LTM retrieve at intake, handoff depth guard |
+| `Gate` | Sole path to `solved`; independent reproduction verification; trusts `sandbox_exec` over flag format |
+| `SpecialistAgent` | Bounded step loop (4 steps, 2-barren stop), hypothesis ledger, LTM lessons, advisory intelligence, handoff evidence carry |
+| Decision modules | `{category}_decision.py` — signal detection → next-action inference |
+| Engines | `BioBrainAdapter`, `CryptoEngine`, `ForensicsEngine`, `WebEngine`, `PwnEngine`, `JailEngine`, `StubReverseEngine` |
+| Working memory | `InMemoryWorkingMemory` (dev) or `RedisWorkingMemory` (prod) |
+| Long-term memory | `NullLongTermMemory` (default) or `BioBrainLongTermMemory` (`CTF_LTM_BACKEND=biobrain`) |
+| Intelligence | `NullIntelligenceService` (default); optional `AgenticRagService` / `EnhancedDeepSearchService` |
 
-1. `shared/schemas.md` — done; everything depends on it.
-2. `researcher` — done; `reverse` and the orchestrator consume its schema.
-3. `deepsearcher` — done; researcher's escalation target.
-4. `reverse` — done; local SOP plus reference material and machine-readable doctrine.
-5. `flag-discipline` + `exploit-sandbox` — done; the two gates.
-6. `ctf-orchestrator` — done; wires it together.
+### Specialist categories
 
-All category specialists are now present: `reverse`, `crypto-attack`,
-`web-exploit`, `binary-pwn`, `forensics`, `stego`, `jail-escape`, `osint`,
-`misc`. Each is the same SOP shape — thin decision loop + ledger + handoff,
-technique depth from the vendored corpus. Category coverage is complete.
+All 9 categories are routed: `reverse`, `crypto-attack`, `web-exploit`, `binary-pwn`, `forensics`, `stego`, `jail-escape`, `osint`, `misc`.
 
-## Deliberately deferred (not bloat-now)
+Decision trees + deterministic engines: reverse, crypto, forensics, stego, web, pwn, jail.
+BioBrain escalation: all categories via `CTF_AGENT_ENGINE=biobrain`.
 
-- **Model racing** (verialabs-style parallel solvers) — expensive; only under
-  live time pressure, not a default.
-- **Memory consolidation / skill evolution** (MemSkill, self-improving-agent) —
-  v2. Add a post-solve `consolidate` step once the static pack is proven.
-- **Benchmark harness** (InterCode-style) — a test rig for the pack later, not a
-  solver now.
-- `reverse-symbolic-solver`, `reverse-bytecode-vm` — split out of `reverse` only
-  when a challenge actually needs them; the handoff points already exist.
+## Quick start
+
+```bash
+# Install dependencies (uv required)
+uv sync
+
+# Solve a static text challenge
+make solve-local ARGS="--name my-flag --category misc \
+  --artifact /tmp/note.txt --flag-format 'CTF\{[^}]+\}'"
+
+# Solve a real binary (needs CTF_AGENT_ENGINE=biobrain for full analysis)
+make llm-drive LLM_ARTIFACT=/path/to/binary LLM_NAME=my-challenge LLM_CATEGORY=reverse
+
+# Show challenge board
+make board
+
+# Run all tests
+make test
+```
+
+## CLI reference
+
+```
+ctfrt <command> [options]
+```
+
+| Command | Description |
+|---------|-------------|
+| `solve-local` | In-process solve. Key flags: `--timeout`, `--solve-budget N`, `--flag-format`, `--json` |
+| `board` | Challenge status table (id, status, category, elapsed, technique). `--json` for scripting |
+| `init-workdir` | Register artifacts into challenge workspace |
+| `inspect` | Triage + routing decision without solving |
+| `validate-candidate` | Gate-only candidate validation |
+| `submit` | Submit challenge to distributed Kafka bus |
+| `show-trace` | Display trace events. Flags: `--latest`, `--run-id <id>`, `--json` |
+| `summarize-trace` | Print trace summary |
+| `export-trace` | Export trace to file |
+| `validate-trace` | Validate trace state machine |
+
+## Make targets
+
+```bash
+make test               # pytest runtime/tests/ -q  (121 tests)
+make smoke              # standalone smoke_runtime.py
+make compile            # byte-compile check
+make board              # challenge status table
+make solve-local        # ARGS="..." — in-process solve
+make llm-drive          # LLM_ARTIFACT=... LLM_NAME=... LLM_CATEGORY=...
+make distributed-up     # start Kafka + Redis via Docker Compose
+make distributed-down   # stop Kafka + Redis
+make trace-show         # CHALLENGE_ID=... — show trace
+make trace-export       # CHALLENGE_ID=... — export trace
+make board              # challenge status table
+```
+
+## Environment variables
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `CTF_AGENT_ENGINE` | Engine mode: `biobrain`, `deterministic`, or empty | — |
+| `CTF_LTM_BACKEND` | Long-term memory: `biobrain` or `none` | `none` |
+| `CTF_INTELLIGENCE_INTERNAL` | Internal advisor: `agentic_rag` | — |
+| `CTF_INTELLIGENCE_EXTERNAL` | External advisor: `enhanced_deep_search` | — |
+| `CTF_MEMORY_QUERY` | CMS memory: `cms` or `none` | `none` |
+| `CTF_KAFKA` | Kafka bootstrap server | `localhost:9092` |
+| `CTF_REDIS` | Redis URL | `redis://localhost:6379/0` |
+| `CTF_CHALLENGE_ROOT` | Artifact workspace root | `/tmp/ctf` |
+| `CTF_TRACE_DIR` | Local trace storage | `.ctfrt/traces` |
+| `CTF_LOG_LEVEL` | Logging level | `INFO` |
+| `CTF_DEBUG_FLAGS` | Set `1` to log flag values unredacted | — |
+
+## Technique corpus
+
+Offline technique references live in `vendor/techniques/` (one file per category, When/Tools/Caveats format). Each category's `SKILL.md` points at the corresponding file. The corpus is consulted by the `AgenticRagService` internal intelligence adapter when `CTF_INTELLIGENCE_INTERNAL=agentic_rag`.
 
 ## Two enforced invariants
 
-1. No candidate is `solved` without `flag-discipline`.
+1. No candidate is `solved` without `flag-discipline` (Gate approval).
 2. No unknown artifact runs outside `exploit-sandbox`.
 
 ## Canonical package layout
 
-The only canonical runtime implementation lives under:
-
-```text
-runtime/ctfrt/
-```
-
-Do not use or ship stale duplicated files such as top-level `gate.py`, `contracts.py`,
-or `orchestrator.py` outside this directory.
+The only canonical runtime implementation lives under `runtime/ctfrt/`. Do not ship duplicate files outside this directory.
