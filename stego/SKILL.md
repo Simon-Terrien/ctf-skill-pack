@@ -4,6 +4,9 @@ description: Extract hidden data from media in CTF challenges — images, audio,
 allowed-tools: Read, Bash, Grep, Glob, Write
 ---
 
+## Reference Corpus
+Local offline technique reference: `vendor/techniques/stego.md` (When / Tools / Caveats for each technique in this category). Consult before escalating to external search.
+
 # stego
 
 ## Role & boundaries

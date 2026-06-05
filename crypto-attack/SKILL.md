@@ -4,6 +4,9 @@ description: Recover plaintext, keys, or secrets from cryptographic challenges b
 allowed-tools: Read, Bash, Grep, Glob, Write
 ---
 
+## Reference Corpus
+Local offline technique reference: `vendor/techniques/crypto.md` (When / Tools / Caveats for each technique in this category). Consult before escalating to external search.
+
 # crypto-attack
 
 ## Role & boundaries

@@ -4,6 +4,9 @@ description: Solve uncategorized CTF challenges — exotic encodings, esoteric l
 allowed-tools: Read, Bash, Grep, Glob, WebSearch, Write
 ---
 
+## Reference Corpus
+Local offline technique reference: `vendor/techniques/misc.md` (When / Tools / Caveats for each technique in this category). Consult before escalating to external search.
+
 # misc
 
 ## Role & boundaries

@@ -1664,6 +1664,45 @@ async def test_stego_decision_png_triggers_lsb_scan(tmp_path: Path):
     assert "lsb" in decision.inferred_techniques
 
 
+async def test_specialist_ltm_lessons_enriched_researcher_question(tmp_path: Path):
+    """LTM lessons from task.triage are prepended to the researcher question."""
+    from ctfrt.memory import NullLongTermMemory
+
+    art = tmp_path / "note.bin"
+    art.write_bytes(b"\x00" * 32)
+
+    researcher_questions: list[str] = []
+
+    class RecordingResearcher(Researcher):
+        async def lookup(self, question: str, tokens=None):
+            researcher_questions.append(question)
+
+    class BarrenEngine:
+        category = Category.reverse
+        async def solve(self, task):
+            return EngineResult(reasoning=["nothing"], evidence=["e=1"])
+
+    bus = InMemoryBus()
+    mem = InMemoryWorkingMemory()
+    agent = SpecialistAgent(Category.reverse, bus, mem, None, RecordingResearcher(),
+                            engine=BarrenEngine(), ltm=NullLongTermMemory())
+
+    # Inject a fake lesson via the triage dict
+    prior_lesson = {"text": "prior mission used xor keygen-inversion technique", "score": 0.9}
+    task = Task(
+        challenge_id="ltm-test", category=Category.reverse,
+        artifacts=[str(art)], flag_format=None,
+        triage={"lessons": [prior_lesson]},
+    )
+
+    import asyncio
+    await agent.handle(task)
+
+    assert researcher_questions, "researcher.lookup should have been called"
+    assert "Prior lessons:" in researcher_questions[0]
+    assert "xor keygen-inversion" in researcher_questions[0]
+
+
 async def test_specialist_barren_loop_emits_hypothesis_and_no_candidate(tmp_path: Path):
     """Agent bounded loop: barren engine emits hypothesis ledger + engine_no_candidate."""
     art = tmp_path / "unknown.bin"
@@ -1802,6 +1841,7 @@ TESTS = [
     test_biobrain_adapter_short_circuits_on_deterministic_reverse_candidate,
     test_specialist_barren_loop_emits_hypothesis_and_no_candidate,
     test_specialist_sandbox_exec_reproduced_bypasses_format_check,
+    test_specialist_ltm_lessons_enriched_researcher_question,
     test_crypto_engine_xor_brute_force_recovers_flag,
     test_crypto_engine_caesar_recovers_flag,
     test_forensics_engine_finds_flag_in_strings,

@@ -4,6 +4,9 @@ description: Recover flags from data artifacts in CTF challenges — pcaps, disk
 allowed-tools: Read, Bash, Grep, Glob, Write
 ---
 
+## Reference Corpus
+Local offline technique reference: `vendor/techniques/forensics.md` (When / Tools / Caveats for each technique in this category). Consult before escalating to external search.
+
 # forensics
 
 ## Role & boundaries

@@ -4,6 +4,9 @@ description: Escape restricted interpreters and sandboxes in CTF challenges — 
 allowed-tools: Read, Bash, Grep, Glob, Write
 ---
 
+## Reference Corpus
+Local offline technique reference: `vendor/techniques/jail.md` (When / Tools / Caveats for each technique in this category). Consult before escalating to external search.
+
 # jail-escape
 
 ## Role & boundaries

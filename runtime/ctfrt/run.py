@@ -126,7 +126,8 @@ async def main(component: str = "all") -> None:
         for cat in Category:
             tasks.append(asyncio.create_task(SpecialistAgent(
                 cat, bus, mem, None, researcher,
-                engine=engine_for_category(cat)).run()))
+                engine=engine_for_category(cat),
+                ltm=ltm).run()))
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

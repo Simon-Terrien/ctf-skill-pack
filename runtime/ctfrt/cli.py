@@ -16,7 +16,7 @@ from .contracts import Candidate, Category, Challenge, TraceEvent
 from .gate import Gate
 from .engines import engine_for_category
 from .log import get_logger, kv, sanitize
-from .memory import InMemoryWorkingMemory, make_working_memory
+from .memory import InMemoryWorkingMemory, make_working_memory, make_long_term_memory
 from .orchestrator import Orchestrator, route
 from .trace_recorder import (
     filter_trace_events,
@@ -234,12 +234,14 @@ async def solve_local(args) -> None:
 
     # Start core loops in one process. Only the routed specialist is needed.
     cat = _category(args.category) or Category.misc
+    ltm = make_long_term_memory()
     loops = [
         asyncio.create_task(local_trace_recorder()),
-        asyncio.create_task(Orchestrator(bus, mem).run()),
+        asyncio.create_task(Orchestrator(bus, mem, ltm=ltm).run()),
         asyncio.create_task(Gate(bus, mem).run()),
         asyncio.create_task(SpecialistAgent(cat, bus, mem, None, researcher,
-                                            engine=engine_for_category(cat)).run()),
+                                            engine=engine_for_category(cat),
+                                            ltm=ltm).run()),
     ]
     await asyncio.sleep(0.05)
 

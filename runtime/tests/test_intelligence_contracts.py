@@ -115,12 +115,54 @@ def test_registry_does_not_require_external_repos():
             os.environ["CTF_INTELLIGENCE_EXTERNAL"] = old_external
 
 
+async def test_agentic_rag_returns_corpus_evidence(tmp_path):
+    """AgenticRagService finds keyword matches in local corpus files."""
+    from integrations.agentic_rag import AgenticRagService
+
+    # Create a mini corpus with technique content
+    corpus = tmp_path / "techniques.md"
+    corpus.write_text("## XOR crackme\n**When:** Binary XOR-transforms input before compare.\n"
+                      "**Tools:** objdump, python single-byte XOR brute-force.\n")
+
+    svc = AgenticRagService(corpus_files=[corpus])
+    answer = await svc.ask(IntelligenceQuestion(
+        mission_id="test-rag",
+        requester="reverse-specialist",
+        question="xor crackme binary objdump",
+    ))
+    assert answer.confidence > 0.0
+    assert len(answer.evidence) >= 1
+    assert answer.evidence[0].source_type == "internal_corpus"
+    assert "techniques.md" in answer.evidence[0].source_id
+    assert not answer.warnings
+
+
+async def test_enhanced_deep_search_wraps_deepsearcher(tmp_path):
+    """EnhancedDeepSearchService returns evidence from DeepSearcher (null search backend)."""
+    from integrations.enhanced_deep_search import EnhancedDeepSearchService
+
+    svc = EnhancedDeepSearchService(max_rounds=1)
+    # With no real web backend, DeepSearcher returns empty evidence — verify degradation
+    answer = await svc.ask(IntelligenceQuestion(
+        mission_id="test-eds",
+        requester="reverse-specialist",
+        question="RSA padding oracle CTF technique",
+        source_scope="external",
+    ))
+    # May return empty evidence (no real web) — should not crash
+    assert isinstance(answer.confidence, float)
+    assert isinstance(answer.evidence, list)
+    assert isinstance(answer.warnings, list)
+
+
 if __name__ == "__main__":
     TESTS = [
         test_null_service_returns_no_evidence,
         test_intelligence_contracts_serialize_and_deserialize,
         test_registry_returns_null_services_by_default,
         test_registry_does_not_require_external_repos,
+        test_agentic_rag_returns_corpus_evidence,
+        test_enhanced_deep_search_wraps_deepsearcher,
     ]
     for test in TESTS:
         result = test()

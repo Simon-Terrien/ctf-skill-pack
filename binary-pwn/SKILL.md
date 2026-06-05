@@ -4,6 +4,9 @@ description: Exploit memory-corruption vulnerabilities in CTF binaries to gain c
 allowed-tools: Read, Bash, Grep, Glob, Write
 ---
 
+## Reference Corpus
+Local offline technique reference: `vendor/techniques/pwn.md` (When / Tools / Caveats for each technique in this category). Consult before escalating to external search.
+
 # binary-pwn
 
 ## Role & boundaries

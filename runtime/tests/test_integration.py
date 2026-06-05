@@ -284,3 +284,53 @@ async def test_multi_challenge_isolation(tmp_path: Path):
     flags_by_challenge = {f["challenge_id"]: f["candidate"] for f in collected}
     assert flags_by_challenge.get("iso-alpha") == "CTF{challenge_alpha}"
     assert flags_by_challenge.get("iso-beta") == "CTF{challenge_beta}"
+
+
+async def test_post_solve_consolidate_records_lesson(tmp_path: Path):
+    """After a challenge is marked solved, Orchestrator.on_flag() calls ltm.consolidate()."""
+    from ctfrt.memory import NullLongTermMemory
+
+    consolidated: list[tuple[str, dict]] = []
+
+    class CaptureLTM(NullLongTermMemory):
+        async def consolidate(self, challenge_id: str, lesson: dict) -> None:
+            consolidated.append((challenge_id, lesson))
+
+    art = tmp_path / "note.txt"
+    art.write_text("CTF{consolidate_win} noise")
+    challenge_root = str(tmp_path / "workspace")
+    workdir, artifacts = _register("consol-01", [str(art)], challenge_root)
+    old_root = config.settings.challenge_root
+    config.settings.challenge_root = challenge_root
+    ltm = CaptureLTM()
+    try:
+        bus = InMemoryBus()
+        mem = InMemoryWorkingMemory()
+        loops = [
+            asyncio.create_task(Orchestrator(bus, mem, ltm=ltm).run()),
+            asyncio.create_task(Gate(bus, mem).run()),
+            asyncio.create_task(SpecialistAgent(
+                Category.misc, bus, mem, None, Researcher(), ltm=ltm).run()),
+        ]
+        flags_sub = bus.subscribe("ctf.flags", group="consol-flags")
+        flag_task = asyncio.create_task(flags_sub.__anext__())
+        await asyncio.sleep(0.05)
+        ch = Challenge(id="consol-01", name="consol-01", category_hint=Category.misc,
+                       workdir=workdir, artifacts=artifacts, flag_format=r"CTF\{[^}]+\}")
+        await bus.publish("ctf.challenges", ch, key=ch.id)
+        try:
+            await asyncio.wait_for(flag_task, 3.0)
+        except (asyncio.TimeoutError, StopAsyncIteration):
+            flag_task.cancel()
+        await asyncio.sleep(0.1)
+    finally:
+        config.settings.challenge_root = old_root
+        for loop in loops:
+            loop.cancel()
+        await asyncio.gather(*loops, return_exceptions=True)
+
+    assert len(consolidated) == 1
+    cid, lesson = consolidated[0]
+    assert cid == "consol-01"
+    assert "static-artifact-scan" in lesson.get("source", "")
+    assert isinstance(lesson.get("technique"), list)

@@ -4,6 +4,9 @@ description: Solve open-source-intelligence CTF challenges — locating informat
 allowed-tools: Read, Bash, Grep, Glob, WebSearch, WebFetch, Write
 ---
 
+## Reference Corpus
+Local offline technique reference: `vendor/techniques/osint.md` (When / Tools / Caveats for each technique in this category). Consult before escalating to external search.
+
 # osint
 
 ## Role & boundaries

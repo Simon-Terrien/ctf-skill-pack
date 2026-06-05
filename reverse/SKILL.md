@@ -4,6 +4,9 @@ description: Understand binaries, bytecode, scripts, validators, keygens, packed
 allowed-tools: Read, Bash, Grep, Glob, Write
 ---
 
+## Reference Corpus
+Local offline technique reference: `vendor/techniques/reverse.md` (When / Tools / Caveats for each technique in this category). Consult before escalating to external search.
+
 # reverse
 
 ## Role & boundaries

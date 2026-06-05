@@ -13,7 +13,7 @@ from .bus import Bus
 from .config import Topics
 from .contracts import Candidate, Category, Handoff, Hypothesis, SandboxRequest, SandboxResult, Task, TraceEvent
 from .llm import LLM, load_skill
-from .memory import MemoryProtocol
+from .memory import MemoryProtocol, NullLongTermMemory
 from .tools import Researcher
 from .engines import SolveEngine
 from .workspace import resolve_artifact_path
@@ -31,13 +31,15 @@ class SpecialistAgent:
 
     def __init__(self, category: Category, bus: Bus, mem: MemoryProtocol,
                  llm: LLM | None, researcher: Researcher,
-                 engine: "SolveEngine | None" = None):
+                 engine: "SolveEngine | None" = None,
+                 ltm=None):
         self.category = category
         self.bus = bus
         self.mem = mem
         self.llm = llm
         self.researcher = researcher
         self.engine = engine        # reasoning core; None -> static scan only
+        self.ltm = ltm or NullLongTermMemory()
         self.sop = load_skill(category.value)
 
     async def _trace(self, challenge_id: str, kind: str, payload: dict) -> None:
@@ -124,9 +126,18 @@ class SpecialistAgent:
         bind_trace = getattr(self.engine, "bind_trace", None)
         if callable(bind_trace):
             bind_trace(lambda kind, payload: self._trace(task.challenge_id, kind, payload))
+
+        # Enrich the researcher question with prior lessons retrieved at triage.
+        lessons: list[dict] = task.triage.get("lessons", [])
+        prior_context = ""
+        if lessons:
+            snippets = "; ".join(l.get("text", "")[:120] for l in lessons[:3] if l.get("text"))
+            if snippets:
+                prior_context = f" Prior lessons: {snippets}."
+
         try:
             await self.researcher.lookup(
-                question=f"{self.category.value} challenge {task.challenge_id}",
+                question=f"{self.category.value} challenge {task.challenge_id}.{prior_context}",
                 tokens=[Path(a).name for a in task.artifacts[:3]] or [task.challenge_id],
             )
         except Exception:

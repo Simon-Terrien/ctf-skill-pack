@@ -184,6 +184,13 @@ class Orchestrator:
                          "technique": c.technique, "source": c.source}))
             log.debug("publish topic", extra=kv(
                 topic=Topics.TRACES, challenge_id=c.challenge_id, kind="solved"))
+            # Record the lesson so future triage for similar challenges retrieves it.
+            await self.ltm.consolidate(c.challenge_id, {
+                "technique": c.technique,
+                "source": c.source,
+                "category": board.get("primary", ""),
+                "evidence": " | ".join(c.evidence[:3]),
+            })
 
     async def on_hypothesis(self, h: Hypothesis) -> None:
         await self.mem.upsert_hypothesis(h)
