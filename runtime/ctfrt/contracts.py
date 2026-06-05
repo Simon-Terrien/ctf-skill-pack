@@ -62,6 +62,28 @@ def _b64_to_bytes(v):
     return v
 
 
+# ---- tool action schema -----------------------------------------------------
+ToolAction = Literal[
+    "strings", "file", "xxd", "entropy", "archive_list",
+    "objdump_disassembly", "objdump_rodata", "readelf_header", "readelf_sections",
+    "readelf_symbols", "checksec", "frequency_analysis", "xor_brute",
+    "caesar_brute", "base64_decode", "pcap_summary", "extract_strings",
+]
+
+
+class ToolCallRecord(BaseModel):
+    """Structured record of a single tool invocation within a specialist step loop."""
+    id: str = Field(default_factory=_id)
+    challenge_id: str
+    tool: ToolAction
+    artifact: str
+    result_summary: str = ""
+    exit_code: int | None = None
+    duration_ms: float = 0.0
+    error: str | None = None
+    ts: float = Field(default_factory=_now)
+
+
 # ---- researcher output (LOCKED, synchronous tool — not a bus message) -------
 class Evidence(BaseModel):
     source: str

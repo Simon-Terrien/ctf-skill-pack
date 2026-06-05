@@ -7,6 +7,9 @@ from shutil import which
 
 from pydantic import BaseModel, Field
 
+# Re-exported for consumers who import ToolAction from this module
+from .contracts import ToolAction  # noqa: F401
+
 
 class ReverseToolSpec(BaseModel):
     name: str

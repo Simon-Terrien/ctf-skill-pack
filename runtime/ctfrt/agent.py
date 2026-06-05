@@ -7,11 +7,13 @@ future model/tool loop.
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 
 from .bus import Bus
 from .config import Topics
-from .contracts import Candidate, Category, Handoff, Hypothesis, SandboxRequest, SandboxResult, Task, TraceEvent
+from .contracts import (Candidate, Category, Handoff, Hypothesis,
+                        SandboxRequest, SandboxResult, Task, ToolCallRecord, TraceEvent)
 from .llm import LLM, load_skill
 from .memory import MemoryProtocol, NullLongTermMemory
 from .tools import Researcher
@@ -32,7 +34,9 @@ class SpecialistAgent:
     def __init__(self, category: Category, bus: Bus, mem: MemoryProtocol,
                  llm: LLM | None, researcher: Researcher,
                  engine: "SolveEngine | None" = None,
-                 ltm=None):
+                 ltm=None,
+                 intelligence_svc=None,
+                 max_tool_steps: int | None = None):
         self.category = category
         self.bus = bus
         self.mem = mem
@@ -40,6 +44,8 @@ class SpecialistAgent:
         self.researcher = researcher
         self.engine = engine        # reasoning core; None -> static scan only
         self.ltm = ltm or NullLongTermMemory()
+        self.intelligence_svc = intelligence_svc  # advisory; None → no-op
+        self._max_tool_steps = max_tool_steps or _MAX_TOOL_STEPS
         self.sop = load_skill(category.value)
 
     async def _trace(self, challenge_id: str, kind: str, payload: dict) -> None:
@@ -135,6 +141,50 @@ class SpecialistAgent:
             if snippets:
                 prior_context = f" Prior lessons: {snippets}."
 
+        # If this task arrived via handoff, carry prior evidence into context.
+        carry = task.triage.get("carry", {})
+        if carry:
+            carry_evidence = carry.get("evidence", [])
+            carry_techniques = carry.get("techniques", [])
+            if carry_evidence or carry_techniques:
+                carry_str = "; ".join(str(e)[:80] for e in carry_evidence[:3])
+                tech_str = ", ".join(carry_techniques[:3])
+                prior_context += (
+                    f" Handoff carry — prior evidence: {carry_str}."
+                    + (f" Techniques tried: {tech_str}." if tech_str else "")
+                )
+
+        # Advisory intelligence query: consult internal knowledge corpus before engine.
+        # Failure degrades silently — this is never on the critical path.
+        advisory_action: str = ""
+        if self.intelligence_svc is not None:
+            try:
+                from .intelligence import IntelligenceQuestion
+                intel_q = IntelligenceQuestion(
+                    mission_id=task.challenge_id,
+                    requester=f"{self.category.value}-specialist",
+                    question=(
+                        f"{self.category.value} challenge: "
+                        f"{' '.join(Path(a).name for a in task.artifacts[:2])}"
+                    ),
+                    source_scope="internal",
+                    max_results=3,
+                )
+                intel_a = await self.intelligence_svc.ask(intel_q)
+                if intel_a.recommended_next_action:
+                    advisory_action = intel_a.recommended_next_action
+                await self._trace(task.challenge_id, "intelligence_advisory", {
+                    "confidence": intel_a.confidence,
+                    "evidence_count": len(intel_a.evidence),
+                    "recommended_next_action": advisory_action,
+                    "warnings": intel_a.warnings,
+                })
+            except Exception:
+                pass  # advisory failure never blocks solve
+
+        if advisory_action:
+            prior_context = f"{prior_context} Advisory: {advisory_action}."
+
         try:
             await self.researcher.lookup(
                 question=f"{self.category.value} challenge {task.challenge_id}.{prior_context}",
@@ -152,9 +202,10 @@ class SpecialistAgent:
         hypothesis_count = 0
         engine_name = type(self.engine).__name__
 
-        for step in range(1, _MAX_TOOL_STEPS + 1):
+        for step in range(1, self._max_tool_steps + 1):
             await self._trace(task.challenge_id, "engine_dispatch",
                               {"engine": engine_name, "step": step})
+            _step_start = time.monotonic()
             try:
                 result = await self.engine.solve(task)
             except Exception as exc:
@@ -164,17 +215,47 @@ class SpecialistAgent:
                     "error": repr(exc),
                 })
                 return
+            _step_ms = round((time.monotonic() - _step_start) * 1000, 1)
+
+            # Emit a ToolCallRecord for the engine dispatch so the tool contract is
+            # visible in traces even though the engine is currently monolithic.
+            _tcr = ToolCallRecord(
+                challenge_id=task.challenge_id,
+                tool="strings",           # placeholder: most engines start with string extraction
+                artifact=task.artifacts[0] if task.artifacts else "",
+                result_summary="; ".join(result.reasoning[:2]) or engine_name,
+                duration_ms=_step_ms,
+            )
+            await self._trace(task.challenge_id, "tool_call_record", _tcr.model_dump())
 
             if result.handoff is not None:
                 log.debug("publish topic", extra=kv(
                     topic=Topics.HANDOFFS, challenge_id=task.challenge_id,
                     target=result.handoff.value))
+                # Carry evidence and open hypothesis IDs to the receiving specialist.
+                open_hypotheses = []
+                try:
+                    open_hypotheses = [
+                        h.id for h in await self.mem.list_hypotheses(task.challenge_id)
+                        if h.result == "open"
+                    ]
+                except Exception:
+                    pass
+                carry = {
+                    "evidence": result.evidence[:5],
+                    "techniques": result.technique,
+                    "open_hypothesis_ids": open_hypotheses,
+                }
                 await self.bus.publish(Topics.HANDOFFS, Handoff(
                     challenge_id=task.challenge_id, from_category=self.category,
                     target=result.handoff, reason=result.handoff_reason or "engine reclassified",
+                    carry=carry,
+                    handoff_depth=task.triage.get("handoff_depth", 0),
                 ), key=task.challenge_id)
                 await self._trace(task.challenge_id, "handoff",
-                                  {"target": result.handoff.value, "step": step})
+                                  {"target": result.handoff.value, "step": step,
+                                   "carry_evidence_count": len(result.evidence[:5]),
+                                   "carry_hypothesis_count": len(open_hypotheses)})
                 return
 
             # Emit a hypothesis for each step so memory can track progress.

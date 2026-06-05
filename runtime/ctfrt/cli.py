@@ -17,6 +17,7 @@ from .gate import Gate
 from .engines import engine_for_category
 from .log import get_logger, kv, sanitize
 from .memory import InMemoryWorkingMemory, make_working_memory, make_long_term_memory
+from .agency_registry import build_internal_knowledge_agency
 from .orchestrator import Orchestrator, route
 from .trace_recorder import (
     filter_trace_events,
@@ -235,13 +236,16 @@ async def solve_local(args) -> None:
     # Start core loops in one process. Only the routed specialist is needed.
     cat = _category(args.category) or Category.misc
     ltm = make_long_term_memory()
+    intelligence_svc = build_internal_knowledge_agency()
     loops = [
         asyncio.create_task(local_trace_recorder()),
         asyncio.create_task(Orchestrator(bus, mem, ltm=ltm).run()),
         asyncio.create_task(Gate(bus, mem).run()),
         asyncio.create_task(SpecialistAgent(cat, bus, mem, None, researcher,
                                             engine=engine_for_category(cat),
-                                            ltm=ltm).run()),
+                                            ltm=ltm,
+                                            intelligence_svc=intelligence_svc,
+                                            max_tool_steps=getattr(args, "solve_budget", None)).run()),
     ]
     await asyncio.sleep(0.05)
 
@@ -366,10 +370,14 @@ def board(args) -> None:
             if ev.kind == "solved":
                 status = "solved"
                 technique = ev.payload.get("technique", [])
-            elif status == "unknown" and ev.kind == "engine_no_candidate":
-                status = "no_candidate"
-            elif status == "unknown" and ev.kind == "needs_engine":
+            elif ev.kind == "engine_no_candidate" and status not in ("solved",):
+                status = "timed_out"
+            elif ev.kind == "engine_error" and status not in ("solved",):
+                status = "failed"
+            elif ev.kind == "needs_engine" and status == "unknown":
                 status = "needs_engine"
+            elif ev.kind == "handoff" and status == "unknown":
+                status = "running"   # still in flight after handoff
 
         elapsed = round(last_ts - first_ts, 1) if first_ts and last_ts else 0.0
         rows.append({
@@ -547,6 +555,8 @@ def main() -> None:
     p.add_argument("--remote")
     p.add_argument("--description")
     p.add_argument("--timeout", type=float, default=5.0)
+    p.add_argument("--solve-budget", type=int, default=None,
+                   help="Max engine iterations per challenge (default: agent _MAX_TOOL_STEPS=4)")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=solve_local)
 

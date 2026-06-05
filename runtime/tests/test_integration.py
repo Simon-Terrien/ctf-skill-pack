@@ -334,3 +334,88 @@ async def test_post_solve_consolidate_records_lesson(tmp_path: Path):
     assert cid == "consol-01"
     assert "static-artifact-scan" in lesson.get("source", "")
     assert isinstance(lesson.get("technique"), list)
+
+
+_TERMINAL_KINDS = {"engine_no_candidate", "candidate_emitted", "handoff", "engine_error"}
+
+
+async def test_every_engine_path_emits_terminal_event(tmp_path: Path):
+    """Every non-static engine path must emit exactly one terminal trace event.
+
+    This is a P1.4 acceptance criterion: no engine dispatch should exit silently.
+    We test three paths: barren (no candidate), success (candidate emitted), handoff.
+    """
+    art = tmp_path / "opaque.bin"
+    art.write_bytes(b"\x00" * 32)
+
+    async def _collect_traces(engine, challenge_id: str, challenge_root: str) -> list[str]:
+        workdir, artifacts = _register(challenge_id, [str(art)], challenge_root)
+        old_root = config.settings.challenge_root
+        config.settings.challenge_root = challenge_root
+        try:
+            bus = InMemoryBus()
+            mem = InMemoryWorkingMemory()
+            traces: list[dict] = []
+            loops = [
+                asyncio.create_task(Orchestrator(bus, mem).run()),
+                asyncio.create_task(Gate(bus, mem).run()),
+                asyncio.create_task(SpecialistAgent(
+                    Category.reverse, bus, mem, None, Researcher(),
+                    engine=engine).run()),
+            ]
+            sub = bus.subscribe("ctf.traces", group=f"trace-{challenge_id}")
+
+            async def collect():
+                async for raw in sub:
+                    traces.append(raw)
+
+            collector = asyncio.create_task(collect())
+            await asyncio.sleep(0.05)
+            ch = Challenge(id=challenge_id, name=challenge_id,
+                           category_hint=Category.reverse,
+                           workdir=workdir, artifacts=artifacts,
+                           flag_format=r"CTF\{[^}]+\}")
+            await bus.publish("ctf.challenges", ch, key=ch.id)
+            await asyncio.sleep(1.5)
+            collector.cancel()
+            for loop in loops:
+                loop.cancel()
+            await asyncio.gather(*loops, collector, return_exceptions=True)
+        finally:
+            config.settings.challenge_root = old_root
+        return [t["kind"] for t in traces]
+
+    challenge_root = str(tmp_path / "workspace")
+
+    # Path A: barren engine → must emit engine_no_candidate
+    class BarrenEngine:
+        category = Category.reverse
+        async def solve(self, task):
+            return ER(reasoning=["nothing found"], evidence=["e=1"])
+
+    kinds_a = await _collect_traces(BarrenEngine(), "terminal-barren", challenge_root)
+    terminal_a = [k for k in kinds_a if k in _TERMINAL_KINDS]
+    assert terminal_a, f"barren path emitted no terminal event; got: {kinds_a}"
+    assert "engine_no_candidate" in terminal_a
+
+    # Path B: engine finds candidate → must emit candidate_emitted
+    class SuccessEngine:
+        category = Category.reverse
+        async def solve(self, task):
+            return ER(candidate="CTF{found}", evidence=["found it"], reproduced=False)
+
+    kinds_b = await _collect_traces(SuccessEngine(), "terminal-success", challenge_root)
+    terminal_b = [k for k in kinds_b if k in _TERMINAL_KINDS]
+    assert terminal_b, f"success path emitted no terminal event; got: {kinds_b}"
+    assert "candidate_emitted" in terminal_b
+
+    # Path C: engine reclassifies → must emit handoff
+    class HandoffEngine:
+        category = Category.reverse
+        async def solve(self, task):
+            return ER(handoff=Category.crypto, handoff_reason="RSA detected")
+
+    kinds_c = await _collect_traces(HandoffEngine(), "terminal-handoff", challenge_root)
+    terminal_c = [k for k in kinds_c if k in _TERMINAL_KINDS]
+    assert terminal_c, f"handoff path emitted no terminal event; got: {kinds_c}"
+    assert "handoff" in terminal_c

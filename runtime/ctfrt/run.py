@@ -23,6 +23,7 @@ from .engines import engine_for_category
 from .memory import make_working_memory, make_long_term_memory
 from .orchestrator import Orchestrator
 from .agent import SpecialistAgent
+from .agency_registry import build_internal_knowledge_agency
 from .sandbox import run_sandboxed
 from .contracts import SandboxRequest
 from .tools import make_researcher
@@ -112,6 +113,7 @@ async def main(component: str = "all") -> None:
     mem = make_working_memory()
     ltm = make_long_term_memory()
     researcher = make_researcher()
+    intelligence_svc = build_internal_knowledge_agency()
 
     tasks: list[asyncio.Task] = []
     for _name, extra in _optional_components(component, bus):
@@ -127,7 +129,8 @@ async def main(component: str = "all") -> None:
             tasks.append(asyncio.create_task(SpecialistAgent(
                 cat, bus, mem, None, researcher,
                 engine=engine_for_category(cat),
-                ltm=ltm).run()))
+                ltm=ltm,
+                intelligence_svc=intelligence_svc).run()))
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

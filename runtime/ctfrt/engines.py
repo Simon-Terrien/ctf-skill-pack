@@ -667,6 +667,12 @@ def engine_for_category(category: Category) -> SolveEngine | None:
             return CryptoEngine()
         if category == Category.forensics:
             return ForensicsEngine()
+        if category == Category.web:
+            return WebEngine()
+        if category == Category.pwn:
+            return PwnEngine()
+        if category == Category.jail:
+            return JailEngine()
     return None
 
 
@@ -808,6 +814,118 @@ class ForensicsEngine:
                     )
 
         return EngineResult(reasoning=["no flag found via forensics string extraction"])
+
+
+# ── Web engine (string search + URL analysis) ─────────────────────────────────
+
+class WebEngine:
+    """Lightweight web engine: string search for flags + HTTP signal detection."""
+    category = Category.web
+
+    async def solve(self, task: Task) -> EngineResult:
+        from .web_decision import analyze_web_artifact, evaluate_web_decision
+
+        for artifact in task.artifacts:
+            try:
+                path = resolve_artifact_path(
+                    artifact,
+                    challenge_id=task.challenge_id,
+                    workdir=task.workdir or None,
+                )
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except (OSError, ValueError):
+                continue
+            signals = analyze_web_artifact(text, path.name)
+            decision = evaluate_web_decision(signals)
+            if task.flag_format:
+                m = re.search(task.flag_format, text)
+                if m:
+                    return EngineResult(
+                        candidate=m.group(0),
+                        evidence=[f"found in web artifact {path.name}", f"kind={signals.kind}"],
+                        reproduced=True,
+                        reproduction={"method": "string_search", "artifact": artifact},
+                        technique=decision.inferred_techniques or ["web-recon"],
+                        reasoning=["flag found in web artifact text"],
+                    )
+        return EngineResult(
+            reasoning=["no flag found in web artifacts; needs live target or deeper analysis"],
+        )
+
+
+# ── Pwn engine (string search + checksec heuristics) ─────────────────────────
+
+class PwnEngine:
+    """Lightweight pwn engine: embedded string scan + dangerous import detection."""
+    category = Category.pwn
+
+    async def solve(self, task: Task) -> EngineResult:
+        from .pwn_decision import analyze_pwn_artifact, evaluate_pwn_decision
+
+        for artifact in task.artifacts:
+            try:
+                path = resolve_artifact_path(
+                    artifact,
+                    challenge_id=task.challenge_id,
+                    workdir=task.workdir or None,
+                )
+                data = path.read_bytes()
+            except (OSError, ValueError):
+                continue
+            signals = analyze_pwn_artifact(data, path.name)
+            decision = evaluate_pwn_decision(signals)
+            text = data.decode("latin-1", errors="ignore")
+            if task.flag_format:
+                m = re.search(task.flag_format, text)
+                if m:
+                    return EngineResult(
+                        candidate=m.group(0),
+                        evidence=[f"found in binary {path.name}"],
+                        reproduced=True,
+                        reproduction={"method": "string_search", "artifact": artifact},
+                        technique=decision.inferred_techniques or ["binary-analysis"],
+                        reasoning=["flag found in binary strings"],
+                    )
+        return EngineResult(
+            reasoning=["no static flag in binary; needs sandbox execution or exploitation"],
+        )
+
+
+# ── Jail engine (string search + jail kind detection) ─────────────────────────
+
+class JailEngine:
+    """Lightweight jail engine: string search + jail type detection."""
+    category = Category.jail
+
+    async def solve(self, task: Task) -> EngineResult:
+        from .jail_decision import analyze_jail_artifact, evaluate_jail_decision
+
+        for artifact in task.artifacts:
+            try:
+                path = resolve_artifact_path(
+                    artifact,
+                    challenge_id=task.challenge_id,
+                    workdir=task.workdir or None,
+                )
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except (OSError, ValueError):
+                continue
+            signals = analyze_jail_artifact(text, path.name)
+            decision = evaluate_jail_decision(signals)
+            if task.flag_format:
+                m = re.search(task.flag_format, text)
+                if m:
+                    return EngineResult(
+                        candidate=m.group(0),
+                        evidence=[f"found in jail artifact {path.name}", f"kind={signals.kind}"],
+                        reproduced=True,
+                        reproduction={"method": "string_search", "artifact": artifact},
+                        technique=decision.inferred_techniques or ["jail-analysis"],
+                        reasoning=["flag found in jail artifact text"],
+                    )
+        return EngineResult(
+            reasoning=["no static flag in jail artifact; needs interactive execution"],
+        )
 
 
 # ── Deterministic stub engine (tests / offline dev) ───────────────────────────

@@ -131,8 +131,17 @@ class Orchestrator:
         ch = ch.model_copy(update={"workdir": workdir, "artifacts": artifacts})
         triage = await self.triage(ch)
         cat = route(triage, ch.category_hint)
-        board = {"name": ch.name, "status": "in_progress", "primary": cat.value,
-                 "workdir": workdir, "artifacts": ch.artifacts, "flags": [], "rejected_paths": []}
+        board = {
+            "name": ch.name,
+            "board_status": "running",   # queued|running|solved|timed_out|failed
+            "status": "in_progress",     # legacy field kept for compatibility
+            "primary": cat.value,
+            "workdir": workdir,
+            "artifacts": ch.artifacts,
+            "flags": [],
+            "rejected_paths": [],
+            "started_at": __import__("time").time(),
+        }
         await self.mem.set_board(ch.id, board)
         await self.bus.publish(Topics.tasks_for(cat), Task(
             challenge_id=ch.id, workdir=workdir, category=cat, artifacts=ch.artifacts,
@@ -171,10 +180,24 @@ class Orchestrator:
         log.debug("publish topic", extra=kv(
             topic=Topics.tasks_for(h.target), challenge_id=h.challenge_id, category=h.target.value))
 
+    async def on_trace(self, ev: TraceEvent) -> None:
+        """Update board_status on terminal trace events."""
+        if ev.kind == "engine_no_candidate":
+            board = await self.mem.get_board(ev.challenge_id)
+            if board and board.get("board_status") == "running":
+                board["board_status"] = "timed_out"
+                await self.mem.set_board(ev.challenge_id, board)
+        elif ev.kind == "engine_error":
+            board = await self.mem.get_board(ev.challenge_id)
+            if board and board.get("board_status") == "running":
+                board["board_status"] = "failed"
+                await self.mem.set_board(ev.challenge_id, board)
+
     async def on_flag(self, c: Candidate) -> None:
         board = await self.mem.get_board(c.challenge_id)
         if c.status == "solved":
             board["status"] = "solved"
+            board["board_status"] = "solved"
             board.setdefault("flags", []).append(c.candidate)
             await self.mem.set_board(c.challenge_id, board)
             log.info("challenge SOLVED", extra=kv(challenge_id=c.challenge_id, status=c.status))
@@ -202,6 +225,7 @@ class Orchestrator:
             self._loop(Topics.HANDOFFS, Handoff, self.on_handoff, "orch-ho"),
             self._loop(Topics.FLAGS, Candidate, self.on_flag, "orch-fl"),
             self._loop(Topics.HYPOTHESES, Hypothesis, self.on_hypothesis, "orch-hy"),
+            self._loop(Topics.TRACES, TraceEvent, self.on_trace, "orch-tr"),
         )
 
     async def _loop(self, topic, model, handler, group):
